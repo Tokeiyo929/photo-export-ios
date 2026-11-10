@@ -107,9 +107,13 @@ jobs:
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" ios/App/build/Build/Products/Debug-iphonesimulator/App.app
-          xcrun simctl privacy "$UDID" grant photos com.tokeiyo929.photoexport
           python3 tests/make_fixtures.py
           xcrun simctl addmedia "$UDID" tests/fixtures/pe-fixture-red-64.png tests/fixtures/pe-fixture-blue-48.png
+          # 部分运行时上从未启动过的 App 无法预授权：先首启登记 TCC，再授权，再巡访
+          xcrun simctl launch "$UDID" com.tokeiyo929.photoexport
+          sleep 3
+          xcrun simctl terminate "$UDID" com.tokeiyo929.photoexport
+          xcrun simctl privacy "$UDID" grant photos com.tokeiyo929.photoexport
           bash tests/run_simulator_tests.sh "$UDID" smoke > smoke-debug.txt 2>&1
 
       - name: Run in-app self tests (-autoTest, isolated)

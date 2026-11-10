@@ -80,7 +80,7 @@ final class SmokeTour {
             if Date() >= deadline {
                 let status = PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue
                 fail("相册为空 120s：authorizationStatus=\(status)"
-                     + "（1=denied 2=restricted 3=notDetermined 4=authorized 5=limited）")
+                     + "（0=notDetermined 1=restricted 2=denied 3=authorized 4=limited）")
                 return
             }
             attempts += 1
