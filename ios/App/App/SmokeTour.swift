@@ -1,4 +1,6 @@
 import Foundation
+import Photos
+import UIKit
 #if DEBUG
 
 /// -autoSmoke 巡访：与 tests/run_simulator_tests.sh 的握手协议一致。
@@ -40,12 +42,7 @@ final class SmokeTour {
         print("PE SMOKE: page \(name)")
         switch name {
         case "01-home":
-            // 等 simctl addmedia 注入的 fixture 出现在相册里
-            waitUntil(timeout: 120,
-                      check: { state.libraryCount > 0 },
-                      onTimeout: { "相册为空（simctl addmedia 未生效或权限未授予）" }) { [weak self] in
-                self?.showMarker(index)
-            }
+            seedAndWaitForLibrary(index: index)
         case "02-export":
             state.startExport()
             waitUntil(timeout: 600,
@@ -65,6 +62,62 @@ final class SmokeTour {
         default: // 04-pc-guide
             delay(0.8) { [weak self] in self?.showMarker(index) }
         }
+    }
+
+    /// 等 01-home 相册非空：优先指望 runner 的 simctl addmedia fixture；
+    /// 数秒仍为 0 则用 PHAssetCreationRequest 自种两张真照片兜底
+    /// （部分 iOS 模拟器 runtime 上 addmedia 不生效）。种出的资产走同一导出链路。
+    private func seedAndWaitForLibrary(index: Int) {
+        guard let state else { fail("AppState 丢失"); return }
+        let deadline = Date().addingTimeInterval(120)
+        var seeded = false
+        var attempts = 0
+        func tick() {
+            if state.libraryCount > 0 {
+                showMarker(index)
+                return
+            }
+            if Date() >= deadline {
+                let status = PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue
+                fail("相册为空 120s：authorizationStatus=\(status)"
+                     + "（1=denied 2=restricted 3=notDetermined 4=authorized 5=limited）")
+                return
+            }
+            attempts += 1
+            if !seeded, attempts >= 12,
+               PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized {
+                seeded = true
+                print("PE SMOKE: 相册仍为空，DEBUG 自种 2 张测试照片")
+                Self.seedSmokeAssets { _ in state.refreshLibrary() }
+            }
+            if attempts % 4 == 0 { state.refreshLibrary() } // 每 1s 重拉，覆盖 fetch 竞态
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { tick() }
+        }
+        tick()
+    }
+
+    /// DEBUG-only：往相册种两张纯色照片（红 64²、蓝 48²），写入的 .photo 资源
+    /// 与真实照片走完全相同的 PHAssetResourceManager.writeData 导出链路。
+    private static func seedSmokeAssets(completion: @escaping (Bool) -> Void) {
+        func pngData(_ color: UIColor, width: CGFloat, height: CGFloat) -> Data? {
+            let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
+            let image = renderer.image { context in
+                color.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            }
+            return image.pngData()
+        }
+        guard let red = pngData(UIColor(red: 0.86, green: 0.16, blue: 0.16, alpha: 1), width: 64, height: 64),
+              let blue = pngData(UIColor(red: 0.16, green: 0.35, blue: 0.86, alpha: 1), width: 48, height: 48) else {
+            completion(false)
+            return
+        }
+        PHPhotoLibrary.shared().performChanges({
+            for data in [red, blue] {
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
+            }
+        }) { success, _ in completion(success) }
     }
 
     private func showMarker(_ index: Int) {
