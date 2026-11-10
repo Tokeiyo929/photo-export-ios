@@ -1,0 +1,17 @@
+# XcodeGen 生成物（CI 里执行 xcodegen generate）
+ios/App/App.xcodeproj/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+smoke/
+autotest/
+*.log
+smoke-debug.txt
+auto-test.txt
+*-console.txt
+tests/fixtures/
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc

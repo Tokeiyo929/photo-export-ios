@@ -1,0 +1,3 @@
+# pull.py 依赖（verify.py / 测试仅标准库）
+# 经数据线（usbmuxd/AFC）访问 App 沙盒；Windows 需 iTunes 或「Apple 设备」App 的驱动。
+pymobiledevice3>=11.0
