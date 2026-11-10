@@ -73,8 +73,8 @@ enum TestSupport {
             _ = ExportPlanner.disambiguate(fileName: "IMG_0001.heic", directory: "2026/2026-03-15", used: &used)
             _ = ExportPlanner.disambiguate(fileName: "IMG_0001.HEIC", directory: "2026/2026-03-15", used: &used)
             let third = ExportPlanner.disambiguate(fileName: "img_0001.Heic", directory: "2026/2026-03-15", used: &used)
-            try require(third == "IMG_0001 (1).Heic" || third == "img_0001 (1).Heic",
-                        "大小写不同也算重名，得到 \(third)")
+            try require(third == "IMG_0001 (2).Heic" || third == "img_0001 (2).Heic",
+                        "前两名已被占（含大小写变体），第三个应加 (2)，得到 \(third)")
         }
         record("重名: 不同目录不冲突") {
             var used: Set<String> = []
