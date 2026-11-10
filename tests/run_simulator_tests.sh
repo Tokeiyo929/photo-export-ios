@@ -37,7 +37,11 @@ for ((second=0; second<poll_seconds; second++)); do
   sleep 1
 done
 test -f "$directory/done.txt" || { echo "Test timed out" >&2; exit 1; }
-test "$(cat "$directory/done.txt")" = PASS
+if [ "$(cat "$directory/done.txt")" != PASS ]; then
+  echo "App reported FAIL（result.txt 原文如下）:" >&2
+  cat "$directory/result.txt" >&2
+  exit 1
+fi
 grep -qx 'RESULT: ALL PASS' "$directory/result.txt"
 if grep -q '^FAIL' "$directory/result.txt"; then cat "$directory/result.txt"; exit 1; fi
 for name in $names; do test -s "$mode/$name.png"; done

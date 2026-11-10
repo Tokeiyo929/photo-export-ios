@@ -99,6 +99,18 @@ jobs:
         timeout-minutes: 5
         run: bash tests/test_simulator_runner.sh
 
+      - name: Grant photo library via XCUITest (无人值守授权)
+        timeout-minutes: 20
+        working-directory: ios/App
+        run: |
+          set -o pipefail
+          # iOS 26 runtime 上宿主侧预授权（simctl privacy / TCC.db）对 readWrite 无效，
+          # 只有用 XCUITest interruption monitor 点掉权限弹窗才能落授权；
+          # 授权按 bundle id 存在模拟器里，后续 -autoSmoke 直接以已授权状态启动。
+          xcodebuild test -project App.xcodeproj -scheme App \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build 2>&1 | tee grant-test.log | tail -40
+
       - name: Launch on simulator and smoke-tour
         timeout-minutes: 15
         run: |
@@ -109,18 +121,7 @@ jobs:
           xcrun simctl install "$UDID" ios/App/build/Build/Products/Debug-iphonesimulator/App.app
           python3 tests/make_fixtures.py
           xcrun simctl addmedia "$UDID" tests/fixtures/pe-fixture-red-64.png tests/fixtures/pe-fixture-blue-48.png
-          # 部分运行时上从未启动过的 App 无法预授权：先首启登记，再授权；
-          # simctl privacy 在部分运行时不落库，兜底直接写模拟器 TCC.db（auth_value 2=允许）
-          xcrun simctl launch "$UDID" com.tokeiyo929.photoexport
-          sleep 3
-          xcrun simctl terminate "$UDID" com.tokeiyo929.photoexport
-          xcrun simctl privacy "$UDID" grant photos com.tokeiyo929.photoexport || true
-          TCC_DB="$HOME/Library/Developer/CoreSimulator/Devices/$UDID/data/Library/TCC/TCC.db"
-          echo "TCC access columns: $(sqlite3 "$TCC_DB" "SELECT group_concat(name,',') FROM pragma_table_info('access');")"
-          sqlite3 "$TCC_DB" "DELETE FROM access WHERE service='kTCCServicePhotos' AND client='com.tokeiyo929.photoexport';
-            INSERT INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags)
-            VALUES ('kTCCServicePhotos','com.tokeiyo929.photoexport',0,2,0,1,0);"
-          sqlite3 "$TCC_DB" "SELECT service, client, auth_value FROM access WHERE client='com.tokeiyo929.photoexport';"
+          # 相册权限已由上一步的 XCUITest 弹窗授权落库
           bash tests/run_simulator_tests.sh "$UDID" smoke > smoke-debug.txt 2>&1
 
       - name: Run in-app self tests (-autoTest, isolated)
@@ -151,6 +152,7 @@ jobs:
             autotest/
             smoke-debug.txt
             auto-test.txt
+            ios/App/grant-test.log
             core-compile.log
             core-run.log
             *-console.txt

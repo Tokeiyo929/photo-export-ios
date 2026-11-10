@@ -39,3 +39,30 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         NSPhotoLibraryUsageDescription: 需要读取相册原片字节（HEIC/JPEG/MOV 保持原始格式，不做任何转码），导出到 App 文件目录后经数据线传到电脑。
         NSPhotoLibraryAddUsageDescription: 仅在需要保存导出报告时写入相册（当前版本不使用）。
+
+  # 无人值守 CI 授权：iOS 26 模拟器上宿主侧预授权（simctl privacy / TCC.db）对 readWrite 无效，
+  # 只有权限弹窗能落授权；用 XCUITest interruption monitor 替人点"允许"。
+  AppUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: UITests
+    dependencies:
+      - target: App
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tokeiyo929.photoexport.uitests
+        TEST_TARGET_NAME: App
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  App:
+    build:
+      targets:
+        App: all
+        AppUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - AppUITests
