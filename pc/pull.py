@@ -63,6 +63,7 @@ async def list_devices() -> int:
 async def amain(args: argparse.Namespace) -> int:
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.house_arrest import HouseArrestService
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -71,9 +72,29 @@ async def amain(args: argparse.Namespace) -> int:
     lockdown = await create_using_usbmux(serial=args.udid)
     pe_common.log(f"已连接：{lockdown.short_info.get('DeviceName', '?')} "
                   f"iOS {lockdown.short_info.get('ProductVersion', '?')}")
-    pe_common.log(f"打开 App 沙盒（house_arrest/VendDocuments）：{args.app}")
+
+    # 解析实际 bundle id：Sideloadly 免签重签会在原 id 后追加团队后缀
+    # （如 com.tokeiyo929.photoexport.FBTKZ8C6QB），先精确匹配再前缀匹配。
+    bundle = args.app
+    try:
+        installed = await InstallationProxyService(lockdown).get_apps()
+        if bundle not in installed:
+            candidates = sorted(b for b in installed
+                                if b == args.app or b.startswith(args.app + "."))
+            if len(candidates) == 1:
+                bundle = candidates[0]
+                pe_common.log(f"App 已重签名，实际 bundle id：{bundle}")
+            elif len(candidates) > 1:
+                pe_common.log("找到多个匹配的 App，请用 --app 指定其一：")
+                for b in candidates:
+                    pe_common.log(f"  {b}")
+                return 2
+    except Exception as error:
+        pe_common.log(f"枚举已装 App 失败（继续按原名尝试）：{error}")
+
+    pe_common.log(f"打开 App 沙盒（house_arrest/VendDocuments）：{bundle}")
     # create 工厂 = 构造 + await send_command(VendDocuments)，出错自动关闭
-    house = await HouseArrestService.create(lockdown, args.app, documents_only=True)
+    house = await HouseArrestService.create(lockdown, bundle, documents_only=True)
 
     # 1) 读清单
     try:
