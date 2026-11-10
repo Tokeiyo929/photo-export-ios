@@ -37,24 +37,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def list_devices() -> int:
+async def list_devices() -> int:
     try:
         from pymobiledevice3 import usbmux
         from pymobiledevice3.lockdown import create_using_usbmux
     except ImportError:
         pe_common.log("缺少依赖：pip install pymobiledevice3")
         return 2
-    devices = usbmux.list_devices()
+    devices = await usbmux.list_devices()  # v11+ 全线 async API
     if not devices:
         pe_common.log("未发现设备：插数据线、解锁手机、信任电脑；Windows 需装 iTunes/Apple 设备 App 的驱动。")
         return 1
     for device in devices:
         try:
-            lockdown = create_using_usbmux(serial=device.serial)
+            lockdown = await create_using_usbmux(serial=device.serial)
             info = lockdown.short_info
             pe_common.log(f"serial={device.serial}  名称={info.get('DeviceName', '?')}  "
                           f"系统={info.get('ProductVersion', '?')}  型号={info.get('ProductType', '?')}")
-            lockdown.close()
+            await lockdown.close()
         except Exception as error:  # 设备可能锁着配对
             pe_common.log(f"serial={device.serial}  （读取信息失败：{error}）")
     return 0
@@ -68,12 +68,12 @@ async def amain(args: argparse.Namespace) -> int:
     dest.mkdir(parents=True, exist_ok=True)
 
     pe_common.log(f"连接设备（{args.udid or '第一台'}）…")
-    lockdown = create_using_usbmux(serial=args.udid)
+    lockdown = await create_using_usbmux(serial=args.udid)
     pe_common.log(f"已连接：{lockdown.short_info.get('DeviceName', '?')} "
                   f"iOS {lockdown.short_info.get('ProductVersion', '?')}")
     pe_common.log(f"打开 App 沙盒（house_arrest/VendDocuments）：{args.app}")
-    house = HouseArrestService(lockdown, documents_only=True)
-    house.send_command(args.app, cmd="VendDocuments")
+    # create 工厂 = 构造 + await send_command(VendDocuments)，出错自动关闭
+    house = await HouseArrestService.create(lockdown, args.app, documents_only=True)
 
     # 1) 读清单
     try:
@@ -175,7 +175,7 @@ async def amain(args: argparse.Namespace) -> int:
             count, zipped = pe_common.make_store_zip(dest, zip_path)
             pe_common.log(f"仅存储 ZIP：{zip_path}（{count} 个文件，{pe_common.bytes_str(zipped)}，字节未动）")
 
-    lockdown.close()
+    await lockdown.close()
     return 0 if summary.ok else 1
 
 
@@ -183,7 +183,7 @@ def main() -> int:
     pe_common.ensure_utf8_stdout()
     args = parse_args()
     if args.list:
-        return list_devices()
+        return asyncio.run(list_devices())
     if not args.dest:
         pe_common.log("需要 --dest 目标目录（或用 --list 先看设备）。")
         return 2
