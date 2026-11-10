@@ -71,7 +71,7 @@ final class SmokeTour {
         let name = Self.pages[index]
         writeMarker("now-\(name)")
         waitUntil(timeout: 180,
-                  check: { FileManager.default.fileExists(atPath: smokeDir.appendingPathComponent("ack-\(name)").path) },
+                  check: { [weak self] in FileManager.default.fileExists(atPath: self?.smokeDir.appendingPathComponent("ack-\(name)").path ?? "/nonexistent") },
                   onTimeout: { "runner 未 ack \(name)" }) { [weak self] in
             self?.runPage(index + 1)
         }
