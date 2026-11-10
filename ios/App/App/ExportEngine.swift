@@ -197,7 +197,7 @@ final class ExportEngine {
                                         creationDate: asset.creationDate,
                                         fileDate: asset.modificationDate,
                                         resources: resources.map { ResourceInfo(fileName: $0.originalFilename,
-                                                                               size: PhotoLibraryService.fileSize(of: $0) }))
+                                                                               size: PhotoLibraryService.fileSize(of: $0)) }))
             flatResources.append(contentsOf: resources)
         }
         let planned = ExportPlanner.plan(assets: assetsInfo, calendar: calendar)
