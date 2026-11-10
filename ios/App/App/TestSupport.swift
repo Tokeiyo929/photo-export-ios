@@ -25,6 +25,11 @@ enum TestSupport {
             guard condition else { throw NSError(domain: "TestSupport", code: 1,
                                                 userInfo: [NSLocalizedDescriptionKey: message]) }
         }
+        func requireUnwrap<T>(_ value: T?, _ message: String) throws -> T {
+            guard let value else { throw NSError(domain: "TestSupport", code: 1,
+                                                userInfo: [NSLocalizedDescriptionKey: message]) }
+            return value
+        }
 
         // MARK: 日期归档
 
@@ -214,6 +219,26 @@ enum TestSupport {
             try require(fields?.count == 4, "字段数 \(String(describing: fields?.count))")
             try require(fields?[0] == "a,\"b\",c", "第一个字段 \(String(describing: fields?[0]))")
             try require(fields?[1] == "2" && fields?[2] == "" && fields?[3] == "x", "后续字段不符")
+        }
+        record("清单: PULLED 状态可解析且计入 donePaths") {
+            var row = ManifestRow()
+            row.relativePath = "2025/2025-06-01/IMG_0001.HEIC"
+            row.sha256 = String(repeating: "3", count: 64)
+            row.status = "PULLED"
+            let fields = try requireUnwrap(ManifestStore.parseLine(ManifestStore.csvLine(for: row)),
+                                           "PULLED 行应可序列化解析")
+            let parsed = try requireUnwrap(ManifestStore.row(from: fields), "PULLED 应可解析")
+            try require(parsed.status == "PULLED", "状态应为 PULLED，得到 \(parsed.status)")
+            try require(parsed.relativePath == row.relativePath, "PULLED 行字段不符")
+        }
+        record("清单: donePaths 含 OK 与 PULLED，不含 FAIL") {
+            var ok = ManifestRow(); ok.relativePath = "a/ok.HEIC"; ok.status = "OK"
+            var pulled = ManifestRow(); pulled.relativePath = "a/pulled.HEIC"; pulled.status = "PULLED"
+            var fail = ManifestRow(); fail.relativePath = "a/fail.HEIC"; fail.status = "FAIL"
+            let done = ManifestStore.donePaths(of: [ok, pulled, fail])
+            try require(done.contains("a/ok.HEIC") && done.contains("a/pulled.HEIC"),
+                        "OK/PULLED 都应计入 donePaths，得到 \(done)")
+            try require(!done.contains("a/fail.HEIC"), "FAIL 不应计入 donePaths")
         }
 
         return outcomes

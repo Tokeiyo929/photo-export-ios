@@ -4,11 +4,20 @@ import UIKit
 
 struct ManifestStats {
     var okCount = 0
+    var pulledCount = 0
     var failCount = 0
     var bytes: Int64 = 0
     var malformed = 0
 
     static let empty = ManifestStats()
+}
+
+/// 「清理已拉取文件」的结果。
+struct CleanResult {
+    var cleaned = 0
+    var bytes: Int64 = 0
+    var absent = 0   // 文件已不在手机（此前清理过/手动删过）
+    var failed = 0   // 删除失败，保持 OK 下次再试
 }
 
 /// 校验结果（设备侧对已导出文件重算哈希）。
@@ -31,10 +40,19 @@ final class AppState: ObservableObject {
     @Published var freeBytes: Int64 = 0
     @Published var estimating = false
 
+    /// 分批导出：每批字节数上限（GB），0 = 不限。大库必备：装不下整个相册时按批导出→拉取→清理。
+    @Published var batchGB = 2
+    var batchBytesLimit: Int64 { Int64(batchGB) * 1_073_741_824 }
+
     @Published var exportRunning = false
+    @Published var planningScanned = 0
+    @Published var planningTotal = 0
     @Published var progress = ExportProgress.empty
     @Published var lastFinished: ExportSummary?
     @Published var selectedTab = 0
+
+    @Published var cleaning = false
+    @Published var cleanResult: CleanResult?
 
     @Published var manifestStats = ManifestStats.empty
     @Published var manifestRows: [ManifestRow] = []
@@ -90,7 +108,8 @@ final class AppState: ObservableObject {
     }
 
     private func refreshEstimate() {
-        guard !estimating else { return }
+        // 全库容量预估要逐资产扫资源，大库要跑好几分钟：只估一次，之后不再重复扫
+        guard !estimating, estimatedBytes == 0 else { return }
         estimating = true
         Task.detached(priority: .utility) { [weak self] in
             let bytes = PhotoLibraryService.estimatedLibraryBytes()
@@ -120,12 +139,19 @@ final class AppState: ObservableObject {
         guard !exportRunning, authorization == .authorized || authorization == .limited else { return }
         exportRunning = true
         progress = .empty
+        planningScanned = 0
+        planningTotal = 0
         lastFinished = nil
         verifyResult = VerifyResult()
         UIApplication.shared.isIdleTimerDisabled = true // 屏幕常亮，保证前台稳定跑完
-        print("PE EXPORT: start")
-        let engine = ExportEngine(documentsURL: documentsURL)
+        print("PE EXPORT: start batchLimit=\(batchGB == 0 ? "unlimited" : "\(batchGB)GB")")
+        let engine = ExportEngine(documentsURL: documentsURL, batchBytesLimit: batchBytesLimit)
         exportEngine = engine
+        engine.onPlanning = { [weak self] scanned, total in
+            guard let self else { return }
+            self.planningScanned = scanned
+            self.planningTotal = total
+        }
         engine.onStart = { [weak self] total, bytes in
             guard let self else { return }
             self.progress.totalFiles = total
@@ -148,13 +174,74 @@ final class AppState: ObservableObject {
             self.progress.currentFile = ""
             print("PE EXPORT: finish ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped) cancelled=\(summary.cancelled)")
             self.loadManifest()
-            self.refreshEstimate()
+            self.refreshFreeSpace() // 预估只算一次，这里只刷新剩余空间
         }
         DispatchQueue.global(qos: .userInitiated).async { engine.run() }
     }
 
     func cancelExport() {
         exportEngine?.cancel()
+    }
+
+    // MARK: - 清理已拉取
+
+    /// 大库分批工作流的关键一步：确认电脑端已拉取并校验 PASS 后，
+    /// 删掉手机端已导出文件腾空间；清单改记 PULLED（哈希保留，证明链不断）。
+    func cleanExportedFiles() {
+        guard !exportRunning, !cleaning else { return }
+        cleaning = true
+        let root = documentsURL
+        let manifestURL = self.manifestURL
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let (rows, _) = ManifestStore.load(url: manifestURL)
+            let dict = ManifestStore.rowDictionary(of: rows)
+            let cleanable = dict.values.filter { $0.status == "OK" }
+            var result = CleanResult()
+            var pulledRows: [ManifestRow] = []
+            let fm = FileManager.default
+            for row in cleanable {
+                let url = root.appendingPathComponent(row.relativePath)
+                if fm.fileExists(atPath: url.path) {
+                    do {
+                        try fm.removeItem(at: url)
+                        result.cleaned += 1
+                        result.bytes += row.size
+                    } catch {
+                        result.failed += 1 // 删不掉的保持 OK，下次再试
+                        continue
+                    }
+                } else {
+                    result.absent += 1
+                }
+                var pulled = row
+                pulled.status = "PULLED"
+                pulled.note = "已拉取到电脑，手机端已清理"
+                pulled.exportedAt = ManifestStore.now()
+                pulledRows.append(pulled)
+            }
+            if !pulledRows.isEmpty {
+                do { try ManifestStore.append(url: manifestURL, rows: pulledRows) } catch { /* 下次重试 */ }
+            }
+            print("PE CLEAN: cleaned=\(result.cleaned) absent=\(result.absent) failed=\(result.failed) freed=\(result.bytes)")
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.cleaning = false
+                self.cleanResult = result
+                self.loadManifest()
+                self.refreshFreeSpace()
+            }
+        }
+    }
+
+    func refreshFreeSpace() {
+        Task.detached(priority: .utility) { [weak self] in
+            let free = (try? URL(fileURLWithPath: NSTemporaryDirectory())
+                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+                .volumeAvailableCapacityForImportantUsage) ?? 0
+            DispatchQueue.main.async {
+                self?.freeBytes = free
+            }
+        }
     }
 
     // MARK: - 清单
@@ -168,6 +255,8 @@ final class AppState: ObservableObject {
             if row.status == "OK" {
                 stats.okCount += 1
                 stats.bytes += row.size
+            } else if row.status == "PULLED" {
+                stats.pulledCount += 1
             } else {
                 stats.failCount += 1
             }

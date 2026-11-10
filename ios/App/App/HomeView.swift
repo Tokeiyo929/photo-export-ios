@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// 导出主页：相册概况 → 开始导出 → 进度/结果。
+/// 导出主页：相册概况 → 开始导出 → 进度/结果 → 清理已拉取。
 struct HomeView: View {
     @EnvironmentObject var state: AppState
+    @State private var showCleanConfirm = false
 
     var body: some View {
         NavigationView {
@@ -11,12 +12,21 @@ struct HomeView: View {
                     header
                     libraryCard
                     exportSection
+                    cleanCard
                     rulesCard
                 }
                 .padding(16)
             }
             .navigationTitle("照片无损导出")
             .onAppear { state.refreshLibrary() }
+            .alert("确认清理？", isPresented: $showCleanConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("删除 \(state.manifestStats.okCount) 个文件", role: .destructive) {
+                    state.cleanExportedFiles()
+                }
+            } message: {
+                Text("前提：电脑端已拉取本批文件，且 export-report.csv 全部 PASS。删除后手机端不再保留这些文件（清单里的哈希保留，证明链不断），将释放约 \(bytesString(state.manifestStats.bytes))。")
+            }
         }
         .navigationViewStyle(.stack)
     }
@@ -92,6 +102,7 @@ struct HomeView: View {
             }
             .buttonStyle(.borderedProminent)
         } else {
+            batchPicker
             Button {
                 state.startExport()
             } label: {
@@ -104,14 +115,43 @@ struct HomeView: View {
         }
     }
 
-    private var runningCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ProgressView(value: progressFraction)
-            Text("完成 \(state.progress.doneFiles + state.progress.skippedFiles) · 失败 \(state.progress.failedFiles) · 跳过 \(state.progress.skippedFiles) / 共 \(state.progress.totalFiles)")
-                .font(.subheadline)
-            Text("已传 \(bytesString(state.progress.bytesDone)) / \(bytesString(state.progress.bytesTotal))")
+    /// 分批导出：每批字节上限。装不下整个相册的机器，靠「导一批→拉取→清理」循环搬运全库。
+    private var batchPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("每批导出上限（导一批 → 电脑拉取校验 → 清理 → 下一批）")
                 .font(.footnote)
                 .foregroundColor(.secondary)
+            Picker("每批上限", selection: $state.batchGB) {
+                Text("不限").tag(0)
+                Text("1 GB").tag(1)
+                Text("2 GB").tag(2)
+                Text("4 GB").tag(4)
+                Text("8 GB").tag(8)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var runningCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if state.progress.totalFiles == 0 {
+                // 规划（扫描相册）阶段：总数还没定，用不定长进度 + 实时扫描计数
+                ProgressView()
+                Text(planningText)
+                    .font(.subheadline)
+                if state.planningTotal > 0 {
+                    Text("已扫 \(state.planningScanned) / \(state.planningTotal) 项，扫描期间同样可以取消")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                ProgressView(value: progressFraction)
+                Text("完成 \(state.progress.doneFiles + state.progress.skippedFiles) · 失败 \(state.progress.failedFiles) · 跳过 \(state.progress.skippedFiles) / 共 \(state.progress.totalFiles)")
+                    .font(.subheadline)
+                Text("已传 \(bytesString(state.progress.bytesDone)) / \(bytesString(state.progress.bytesTotal))")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
             if !state.progress.currentFile.isEmpty {
                 Text(state.progress.currentFile)
                     .font(.footnote.monospaced())
@@ -131,6 +171,13 @@ struct HomeView: View {
         .cornerRadius(12)
     }
 
+    private var planningText: String {
+        if state.planningTotal > 0 {
+            return "正在扫描相册 \(state.planningScanned) / \(state.planningTotal)…"
+        }
+        return "正在扫描相册…（大相册首次扫描要一会儿，请稍候）"
+    }
+
     private var progressFraction: Double? {
         guard state.progress.bytesTotal > 0 else { return nil }
         return Double(state.progress.bytesDone) / Double(state.progress.bytesTotal)
@@ -138,12 +185,22 @@ struct HomeView: View {
 
     private func finishedCard(_ summary: ExportSummary) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(summary.cancelled ? "已取消" : (summary.allGood ? "导出完成" : "完成（有失败项）"),
+            Label(finishedTitle(summary),
                   systemImage: summary.allGood ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.headline)
                 .foregroundColor(summary.allGood ? .green : .orange)
             Text("成功 \(summary.ok) · 失败 \(summary.failed) · 跳过(已导过) \(summary.skipped) · 共 \(bytesString(summary.bytesTotal))")
                 .font(.subheadline)
+            if summary.batchLimited {
+                Label("本批已到字节上限，剩余照片下次「再次导出」继续", systemImage: "shippingbox.fill")
+                    .font(.footnote)
+                    .foregroundColor(.orange)
+            }
+            if let reason = summary.stoppedReason {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundColor(.orange)
+            }
             if !summary.allGood {
                 ForEach(summary.errors.prefix(5), id: \.self) { line in
                     Text(line)
@@ -158,7 +215,7 @@ struct HomeView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            Text("下一步：去「电脑」页签，数据线拉取到电脑并校验。")
+            Text(nextStepText(summary))
                 .font(.footnote)
                 .foregroundColor(.secondary)
         }
@@ -166,6 +223,61 @@ struct HomeView: View {
         .padding(14)
         .background(Color(.systemGray6))
         .cornerRadius(12)
+    }
+
+    private func finishedTitle(_ summary: ExportSummary) -> String {
+        if summary.cancelled { return "已取消" }
+        if summary.stoppedReason != nil { return "本批提前结束（非错误）" }
+        return summary.allGood ? "导出完成" : "完成（有失败项）"
+    }
+
+    private func nextStepText(_ summary: ExportSummary) -> String {
+        if summary.batchLimited || summary.stoppedReason != nil {
+            return "下一步：电脑拉取本批并校验全 PASS → 回本页点「清理已拉取文件」释放空间 → 再点「再次导出」继续下一批。"
+        }
+        return "下一步：去「电脑」页签，数据线拉取到电脑并校验。"
+    }
+
+    /// 分批工作流的收尾一步：确认拉取校验 PASS 后，删手机端文件、清单改记 PULLED。
+    @ViewBuilder
+    private var cleanCard: some View {
+        if state.manifestStats.okCount > 0 || state.cleaning {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("已导出待拉取 \(state.manifestStats.okCount) 个 · \(bytesString(state.manifestStats.bytes))",
+                      systemImage: "tray.and.arrow.down.fill")
+                    .font(.headline)
+                Text("电脑端拉取并校验全 PASS 后，点这里删除手机端这些文件腾空间；清单改记 PULLED（哈希保留）。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                Button(role: .destructive) {
+                    showCleanConfirm = true
+                } label: {
+                    if state.cleaning {
+                        HStack { ProgressView(); Text("清理中…") }
+                    } else {
+                        Label("清理已拉取文件", systemImage: "trash")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(state.exportRunning || state.cleaning)
+                if let result = state.cleanResult {
+                    Text(cleanResultText(result))
+                        .font(.footnote)
+                        .foregroundColor(result.failed == 0 ? .green : .orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(Color(.systemGray6))
+            .cornerRadius(12)
+        }
+    }
+
+    private func cleanResultText(_ result: CleanResult) -> String {
+        var text = "清理完成：删除 \(result.cleaned) 个，释放 \(bytesString(result.bytes))"
+        if result.absent > 0 { text += "，\(result.absent) 个本就不在（改记 PULLED）" }
+        if result.failed > 0 { text += "，\(result.failed) 个删除失败（保持 OK，下次再试）" }
+        return text
     }
 
     private var rulesCard: some View {

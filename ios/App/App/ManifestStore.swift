@@ -1,7 +1,10 @@
 import Foundation
 
-/// 导出清单的一行。status: "OK"（导出成功且哈希一致）/ "FAIL"（失败，note 记原因）。
-/// 断点续跑的依据：OK 的 relative_path 下次跳过，FAIL 下次重试。
+/// 导出清单的一行。status:
+/// - "OK"：导出成功且哈希一致，文件在手机 Documents 里，待 PC 拉取
+/// - "PULLED"：已拉取到电脑，手机端文件已清理（哈希仍在，证明链不断）
+/// - "FAIL"：失败，note 记原因
+/// 断点续跑的依据：OK/PULLED 的 relative_path 下次跳过，FAIL 下次重试。
 struct ManifestRow {
     var relativePath: String = ""
     var size: Int64 = 0
@@ -97,7 +100,8 @@ enum ManifestStore {
         row.status = fields[7]
         row.exportedAt = fields[8]
         row.note = fields[9]
-        guard !row.relativePath.isEmpty, row.status == "OK" || row.status == "FAIL" else { return nil }
+        guard !row.relativePath.isEmpty,
+              row.status == "OK" || row.status == "PULLED" || row.status == "FAIL" else { return nil }
         return row
     }
 
@@ -125,6 +129,11 @@ enum ManifestStore {
 
     static func okPaths(of rows: [ManifestRow]) -> Set<String> {
         Set(rowDictionary(of: rows).filter { $0.value.status == "OK" }.keys)
+    }
+
+    /// 已完成（导出成功或已拉取清理）的路径集合：规划时跳过，重名去重也要避开这些名字。
+    static func donePaths(of rows: [ManifestRow]) -> Set<String> {
+        Set(rowDictionary(of: rows).filter { $0.value.status == "OK" || $0.value.status == "PULLED" }.keys)
     }
 
     /// 追加若干行；文件不存在时先写 BOM + 表头。

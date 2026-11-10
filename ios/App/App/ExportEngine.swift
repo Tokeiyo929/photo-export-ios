@@ -23,6 +23,10 @@ struct ExportSummary {
     var bytesTotal: Int64 = 0
     var cancelled = false
     var errors: [String] = []
+    /// 本批按字节上限收尾（剩下的下次「再次导出」继续）
+    var batchLimited = false
+    /// 空间护栏触发等原因导致提前结束的说明（非错误，UI 提示先拉取清理）
+    var stoppedReason: String?
 
     var allGood: Bool { failed == 0 }
 }
@@ -30,10 +34,16 @@ struct ExportSummary {
 /// 导出引擎：规划 → 逐文件 tmp 写入 → SHA-256 → 移入 Documents 按日期目录 → 复算 SHA-256
 /// → 一致才记 OK，否则记 FAIL 并删除坏文件。单文件失败只记清单，不中断整体。
 /// manifest.csv 逐文件追加落盘：任意时刻被杀，已 OK 的行已在盘上，下次续跑跳过。
+/// 大库友好：规划流式扫描，达到本批字节上限即停（不再全库扫一遍）；扫描中可取消；
+/// 剩余空间低于护栏时优雅结束本批，提示先拉取清理。
 final class ExportEngine {
 
     private let documentsURL: URL
     private let calendar: Calendar
+    /// 本批字节数上限（0 = 不限）。规划扫到预算即停。
+    private let batchBytesLimit: Int64
+    /// 空间护栏：剩余可用低于「本文件大小 + 预留」时结束本批。
+    private let freeSpaceReserve: Int64 = 1_073_741_824 // 1 GB
     private let lock = NSLock()
     private var cancelledFlag = false
 
@@ -51,15 +61,18 @@ final class ExportEngine {
 
     // 回调一律在主队列
     var onStart: ((Int, Int64) -> Void)?
+    /// 规划扫描进度（已扫描资产数, 相册总数），扫描期间 UI 显示"扫描 x/y"
+    var onPlanning: ((Int, Int) -> Void)?
     var onFileStarted: ((String) -> Void)?
     var onFileDone: ((ManifestRow, ExportProgress) -> Void)?
     var onFinish: ((ExportSummary) -> Void)?
 
     private var progress = ExportProgress.empty
 
-    init(documentsURL: URL, calendar: Calendar = .current) {
+    init(documentsURL: URL, calendar: Calendar = .current, batchBytesLimit: Int64 = 0) {
         self.documentsURL = documentsURL
         self.calendar = calendar
+        self.batchBytesLimit = batchBytesLimit
     }
 
     private struct WorkItem {
@@ -70,11 +83,24 @@ final class ExportEngine {
 
     func run() {
         var summary = ExportSummary()
+        let manifestURL = documentsURL.appendingPathComponent("manifest.csv")
         do {
-            let items = try buildWorkItems()
-            let manifestURL = documentsURL.appendingPathComponent("manifest.csv")
             let (rows, _) = ManifestStore.load(url: manifestURL)
-            var okSet = ManifestStore.okPaths(of: rows)
+            let dict = ManifestStore.rowDictionary(of: rows)
+            var doneSet = Set<String>()
+            // assetId -> (photo/video -> [已完成的相对路径，按追加顺序])
+            // 用于规划时按序消费，保证跨批重名消歧结果一致（不重导、不顶名）
+            var doneByAsset: [String: [String: [String]]] = [:]
+            for row in dict.values where row.status == "OK" || row.status == "PULLED" {
+                doneSet.insert(row.relativePath)
+                let kind = row.mediaType == "video" ? "video" : "photo"
+                doneByAsset[row.assetId, default: [:]][kind, default: []].append(row.relativePath)
+            }
+            // 已占用的名字（OK/PULLED 的最终路径）参与重名去重
+            var used = Set(doneSet.map { $0.lowercased() })
+            var items: [WorkItem] = []
+            let truncated = try planBatch(into: &items, doneByAsset: doneByAsset, used: &used)
+            summary.batchLimited = truncated
 
             progress = ExportProgress()
             progress.totalFiles = items.count
@@ -88,8 +114,13 @@ final class ExportEngine {
                     summary.cancelled = true
                     break
                 }
+                // 空间护栏：写不下这个文件就停批，避免刷一屏"磁盘满"FAIL
+                if let free = freeSpaceBytes(), free < item.planned.fileSize + freeSpaceReserve {
+                    summary.stoppedReason = "剩余空间不足（剩 \(bytesString(free))，导 \(bytesString(item.planned.fileSize)) 需预留护栏）。本批到此为止：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
+                    break
+                }
                 let path = item.planned.relativePath
-                if okSet.contains(path) {
+                if doneSet.contains(path) {
                     summary.skipped += 1
                     progress.skippedFiles += 1
                     progress.bytesDone += item.planned.fileSize
@@ -99,7 +130,7 @@ final class ExportEngine {
                 do {
                     let row = try exportOne(item: item, manifestURL: manifestURL)
                     if row.status == "OK" {
-                        okSet.insert(path)
+                        doneSet.insert(path)
                         summary.ok += 1
                         progress.doneFiles += 1
                     } else {
@@ -120,6 +151,8 @@ final class ExportEngine {
                     main { self.onFileDone?(row, self.progress) }
                 }
             }
+        } catch is CancellationError {
+            summary.cancelled = true
         } catch {
             summary.errors.append("规划失败 — " + error.localizedDescription)
         }
@@ -181,36 +214,64 @@ final class ExportEngine {
 
     // MARK: - 规划
 
-    private func buildWorkItems() throws -> [WorkItem] {
+    /// 流式规划本批工作项：按拍摄时间正序扫资产，扫到本批字节上限即停。
+    /// 已完成的资源按 assetId+类型 从清单按序消费（名字已占用，不重导、不顶名）。
+    /// 返回是否因预算截断。规划全程可取消、每 200 个回调一次进度。
+    private func planBatch(into items: inout [WorkItem],
+                           doneByAsset: [String: [String: [String]]],
+                           used: inout Set<String>) throws -> Bool {
         let fetch = PhotoLibraryService.fetchAllAssets()
-        var assets: [PHAsset] = []
-        var assetsInfo: [AssetInfo] = []
-        var flatResources: [PHAssetResource] = []
-        fetch.enumerateObjects { asset, _, _ in
+        let total = fetch.count
+        var scanned = 0
+        var batchBytes: Int64 = 0
+        // 每资产的可变剩余完成表
+        var remaining = doneByAsset
+        for index in 0..<total {
+            if cancelled { throw CancellationError() }
+            let asset = fetch.object(at: index)
+            scanned += 1
+            if scanned % 200 == 0 || scanned == total {
+                main { self.onPlanning?(scanned, total) }
+            }
             let resources = PhotoLibraryService.exportResources(for: asset)
-            guard !resources.isEmpty else { return }
-            assets.append(asset)
-            assetsInfo.append(AssetInfo(id: asset.localIdentifier,
-                                        mediaType: asset.mediaType == .video ? "video" : "photo",
-                                        isLive: asset.mediaSubtypes.contains(.photoLive),
-                                        isFavorite: asset.isFavorite,
-                                        creationDate: asset.creationDate,
-                                        fileDate: asset.modificationDate,
-                                        resources: resources.map { ResourceInfo(fileName: $0.originalFilename,
-                                                                               size: PhotoLibraryService.fileSize(of: $0)) }))
-            flatResources.append(contentsOf: resources)
+            guard !resources.isEmpty else { continue }
+            let (directory, source) = ExportPlanner.dateDirectory(creationDate: asset.creationDate,
+                                                                  fileDate: asset.modificationDate,
+                                                                  calendar: calendar)
+            for resource in resources {
+                // 与清单行一致：mediaType 按 asset.mediaType 记（Live Photo 的 pairedVideo 行也是 "photo"），
+                // 同一资产内按资源顺序消费，正好对应清单追加顺序
+                let kind = asset.mediaType == .video ? "video" : "photo"
+                // 已完成：按序消费对应清单行，跳过（其名字已在 used，不会被人顶掉）
+                if var perKind = remaining[asset.localIdentifier],
+                   var list = perKind[kind], !list.isEmpty {
+                    list.removeFirst()
+                    perKind[kind] = list
+                    remaining[asset.localIdentifier] = perKind
+                    continue
+                }
+                let fileName = ExportPlanner.disambiguate(fileName: resource.originalFilename,
+                                                          directory: directory, used: &used)
+                let size = PhotoLibraryService.fileSize(of: resource)
+                items.append(WorkItem(asset: asset, resource: resource,
+                                      planned: PlannedFile(relativePath: directory + "/" + fileName,
+                                                           fileName: fileName,
+                                                           directory: directory,
+                                                           dateSource: source,
+                                                           fileSize: size)))
+                batchBytes += size
+            }
+            if batchBytesLimit > 0 && batchBytes >= batchBytesLimit {
+                return true
+            }
         }
-        let planned = ExportPlanner.plan(assets: assetsInfo, calendar: calendar)
-        guard planned.count == flatResources.count else {
-            throw NSError(domain: "ExportEngine", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "规划数 \(planned.count) 与资源数 \(flatResources.count) 不一致"])
-        }
-        var items: [WorkItem] = []
-        items.reserveCapacity(planned.count)
-        for (index, plan) in planned.enumerated() {
-            items.append(WorkItem(asset: assets[index], resource: flatResources[index], planned: plan))
-        }
-        return items
+        return false
+    }
+
+    /// 可用空间（按重要用途口径），取不到返回 nil（护栏跳过）。
+    private func freeSpaceBytes() -> Int64? {
+        try? documentsURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage
     }
 
     private func main(_ body: @escaping () -> Void) {

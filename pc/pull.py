@@ -83,8 +83,11 @@ async def amain(args: argparse.Namespace) -> int:
         pe_common.log("请确认 App 已在手机上跑过一次导出，bundle id 是否正确（--app）。")
         return 2
     rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
-    expected = [r for r in pe_common.last_wins(rows) if r.status == "OK"]
-    pe_common.log(f"清单：待拉取 {len(expected)} 个文件"
+    expected = pe_common.pullable_rows(rows)
+    pulled_note = ""
+    if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
+        pulled_note = "（PULLED 的已拉取清理，跳过）"
+    pe_common.log(f"清单：待拉取 {len(expected)} 个文件{pulled_note}"
                   + (f"，损坏行 {malformed}" if malformed else ""))
 
     # 2) 枚举设备端文件（顺带发现清单之外的孤儿文件）

@@ -10,8 +10,13 @@ struct ManifestView: View {
                 Section {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("已导出 \(state.manifestStats.okCount) 个文件 · 共 \(bytesString(state.manifestStats.bytes))")
+                            Text("已导出待拉取 \(state.manifestStats.okCount) 个文件 · 共 \(bytesString(state.manifestStats.bytes))")
                                 .font(.subheadline)
+                            if state.manifestStats.pulledCount > 0 {
+                                Text("已拉取清理 \(state.manifestStats.pulledCount) 个（手机端已删，电脑端为唯一副本，哈希保留）")
+                                    .font(.footnote)
+                                    .foregroundColor(.secondary)
+                            }
                             if state.manifestStats.failCount > 0 {
                                 Text("失败 \(state.manifestStats.failCount) 个（重跑自动重试）")
                                     .font(.footnote)
@@ -64,7 +69,7 @@ struct ManifestView: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
                                     Circle()
-                                        .fill(row.status == "OK" ? Color.green : Color.red)
+                                        .fill(statusColor(row.status))
                                         .frame(width: 8, height: 8)
                                     Text(row.relativePath)
                                         .font(.footnote.monospaced())
@@ -77,7 +82,7 @@ struct ManifestView: View {
                                     if row.favorite { Text("❤️") }
                                     Spacer()
                                     Text(row.status)
-                                        .foregroundColor(row.status == "OK" ? .green : .red)
+                                        .foregroundColor(statusColor(row.status))
                                 }
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
@@ -104,6 +109,14 @@ struct ManifestView: View {
         case "creation": return "拍摄时间"
         case "filetime": return "文件时间"
         default: return "无日期"
+        }
+    }
+
+    private func statusColor(_ status: String) -> Color {
+        switch status {
+        case "OK": return .green
+        case "PULLED": return Color.blue.opacity(0.6)
+        default: return .red
         }
     }
 }

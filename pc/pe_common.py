@@ -29,7 +29,7 @@ class ManifestRow:
     asset_id: str = ""
     media_type: str = ""
     favorite: str = ""
-    status: str = ""          # OK / FAIL
+    status: str = ""          # OK（在手机待拉取）/ PULLED（已拉取清理，电脑为唯一副本）/ FAIL
     exported_at: str = ""
     note: str = ""
 
@@ -79,7 +79,7 @@ def parse_manifest_bytes(raw: bytes) -> Tuple[List[ManifestRow], int]:
             continue
         row = ManifestRow(*fields[: len(MANIFEST_HEADER)])
         row.size = to_int(fields[1])
-        if row.status not in ("OK", "FAIL") or not row.relative_path:
+        if row.status not in ("OK", "PULLED", "FAIL") or not row.relative_path:
             malformed += 1
             continue
         rows.append(row)
@@ -99,6 +99,12 @@ def last_wins(rows: Iterable[ManifestRow]) -> List[ManifestRow]:
     for row in rows:
         result[row.relative_path] = row
     return list(result.values())
+
+
+def pullable_rows(rows: Iterable[ManifestRow]) -> List[ManifestRow]:
+    """待拉取的行：last_wins 后仍为 OK 的。
+    PULLED=已拉取清理（手机端文件已删，不能再拉）；FAIL=失败待重试（设备上也没有文件）。"""
+    return [r for r in last_wins(rows) if r.status == "OK"]
 
 
 def local_path(folder: Path, relative_path: str) -> Path:
@@ -122,7 +128,8 @@ def verify_folder(folder: Path, manifest_path: Optional[Path] = None,
                        "size": 0, "result": "MISSING", "note": "清单不存在：" + str(manifest_path)})
         return report, summary
     rows, malformed = parse_manifest_bytes(manifest_path.read_bytes())
-    expected = {r.relative_path: r for r in last_wins(rows) if r.status == "OK"}
+    # OK 与 PULLED 都要校验：PULLED 的哈希仍在清单里，文件夹里存有该文件（清理前拉出的）就照样验
+    expected = {r.relative_path: r for r in last_wins(rows) if r.status in ("OK", "PULLED")}
 
     seen = set()
     for relative_path, row in expected.items():

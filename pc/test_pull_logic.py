@@ -50,6 +50,30 @@ class ManifestParsingTest(unittest.TestCase):
         rows = pe_common.last_wins([old, new])
         self.assertEqual(rows[0].status, "OK")
 
+    def test_pulled_status_parsed(self):
+        raw = (HEADER + "\n"
+               + "a/b.HEIC,5," + "0" * 64
+               + ",creation,id,photo,0,PULLED,2026-11-10T00:00:00Z,已拉取到电脑，手机端已清理\n").encode("utf-8")
+        rows, malformed = pe_common.parse_manifest_bytes(raw)
+        self.assertEqual((len(rows), malformed), (1, 0))
+        self.assertEqual(rows[0].status, "PULLED")
+        self.assertEqual(rows[0].note, "已拉取到电脑，手机端已清理")
+
+    def test_pullable_rows_skips_pulled_and_fail(self):
+        rows = [
+            pe_common.ManifestRow(relative_path="ok.HEIC", status="OK"),
+            pe_common.ManifestRow(relative_path="pulled.HEIC", status="PULLED"),
+            pe_common.ManifestRow(relative_path="fail.HEIC", status="FAIL"),
+        ]
+        self.assertEqual([r.relative_path for r in pe_common.pullable_rows(rows)], ["ok.HEIC"])
+
+    def test_last_wins_ok_to_pulled_not_pullable(self):
+        rows = [
+            pe_common.ManifestRow(relative_path="a.HEIC", status="OK"),
+            pe_common.ManifestRow(relative_path="a.HEIC", status="PULLED"),
+        ]
+        self.assertEqual(pe_common.pullable_rows(rows), [])
+
 
 class VerifyFolderTest(unittest.TestCase):
     def setUp(self):
@@ -110,6 +134,25 @@ class VerifyFolderTest(unittest.TestCase):
             rows = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["result"], "PASS")
+
+    def test_pulled_row_still_verified_when_file_present(self):
+        # 清理前的场景：手机端改记 PULLED，但电脑上这批文件还在 —— 校验照样要覆盖它
+        payload_c = b"CCC" * 50
+        (self.folder / "2026/2026-03-15/c.HEIC").write_bytes(payload_c)
+        with open(self.folder / pe_common.MANIFEST_NAME, "a", encoding="utf-8") as handle:
+            handle.write(manifest_row("2026/2026-03-15/c.HEIC", payload_c, status="PULLED") + "\n")
+        report, summary = pe_common.verify_folder(self.folder)
+        self.assertTrue(summary.ok)
+        self.assertEqual(summary.passed, 3)
+
+    def test_pulled_row_missing_not_error_when_absent(self):
+        # 清理后的场景（手机端文件已删）：新 --dest 里自然没有 PULLED 文件。
+        # verify_folder 以清单为准逐文件查，PULLED 且文件不在 → MISSING（提示同一 --dest 续用）
+        with open(self.folder / pe_common.MANIFEST_NAME, "a", encoding="utf-8") as handle:
+            handle.write(manifest_row("2026/2026-03-15/gone.HEIC", b"ZZZ", status="PULLED") + "\n")
+        report, summary = pe_common.verify_folder(self.folder)
+        self.assertFalse(summary.ok)
+        self.assertEqual(summary.missing, 1)
 
 
 class StoreZipTest(unittest.TestCase):
