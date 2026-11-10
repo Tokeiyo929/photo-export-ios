@@ -81,7 +81,7 @@ final class ExportEngine {
             progress.bytesTotal = items.reduce(0) { $0 + $1.planned.fileSize }
             summary.totalFiles = items.count
             summary.bytesTotal = progress.bytesTotal
-            main { self.onStart?(items.count, progress.bytesTotal) }
+            main { self.onStart?(items.count, self.progress.bytesTotal) }
 
             for item in items {
                 if cancelled {
@@ -197,7 +197,7 @@ final class ExportEngine {
                                         creationDate: asset.creationDate,
                                         fileDate: asset.modificationDate,
                                         resources: resources.map { ResourceInfo(fileName: $0.originalFilename,
-                                                                               size: $0.fileSize) }))
+                                                                               size: PhotoLibraryService.fileSize(of: $0) }))
             flatResources.append(contentsOf: resources)
         }
         let planned = ExportPlanner.plan(assets: assetsInfo, calendar: calendar)

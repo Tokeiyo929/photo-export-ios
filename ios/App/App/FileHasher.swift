@@ -14,7 +14,7 @@ enum FileHasher {
         while true {
             var chunk = try handle.read(upToCount: chunkSize) ?? Data()
             if chunk.isEmpty { break }
-            hasher.update(buffering: &chunk)
+            hasher.update(data: chunk)
         }
         return hexEncode(Array(hasher.finalize()))
     }

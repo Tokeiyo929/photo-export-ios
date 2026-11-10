@@ -61,7 +61,7 @@ enum ExportPlanner {
         let ext: String
         if let range = fileName.range(of: ".", options: .backwards), range.lowerBound > fileName.startIndex {
             base = String(fileName[fileName.startIndex..<range.lowerBound])
-            ext = String(range.lowerBound..<fileName.endIndex) // 含 "."
+            ext = String(fileName[range.lowerBound...]) // 含 "."
         } else {
             base = fileName
             ext = ""

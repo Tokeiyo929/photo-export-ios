@@ -20,7 +20,7 @@ enum PhotoLibraryService {
     }
 
     /// 挑出该资产要导出的"原始"资源：
-    /// - 照片：.photo（原片字节）；RAW+JPEG 的 .altPhoto（非 RAW 侧）也保留
+    /// - 照片：.photo（原片字节）；RAW+JPEG 的 .alternatePhoto（非 RAW 侧）也保留
     /// - Live Photo：原片 + .pairedVideo 实况视频，成对同名导出
     /// - 视频：.video（原始视频）
     /// 编辑版（.fullSizePhoto/.fullSizeVideo）是渲染产物，会重编码，一律不导。
@@ -28,7 +28,7 @@ enum PhotoLibraryService {
         let all = PHAssetResource.assetResources(for: asset)
         switch asset.mediaType {
         case .image:
-            var selected = all.filter { $0.type == .photo || $0.type == .altPhoto }
+            var selected = all.filter { $0.type == .photo || $0.type == .alternatePhoto }
             if asset.mediaSubtypes.contains(.photoLive) {
                 selected += all.filter { $0.type == .pairedVideo }
             }
@@ -50,14 +50,14 @@ enum PhotoLibraryService {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
         if let onProgress {
-            options.progressHandler = { fraction, _, _, _ in
+            options.progressHandler = { fraction in
                 onProgress(fraction)
             }
         }
         var boxedError: Error?
         let semaphore = DispatchSemaphore(value: 0)
         PHAssetResourceManager.default().writeData(for: resource,
-                                                   to: url,
+                                                   toFile: url,
                                                    options: options) { error in
             boxedError = error
             semaphore.signal()
@@ -72,10 +72,15 @@ enum PhotoLibraryService {
         var total: Int64 = 0
         fetch.enumerateObjects { asset, _, _ in
             for resource in exportResources(for: asset) {
-                total += resource.fileSize
+                total += fileSize(of: resource)
             }
         }
         return total
+    }
+
+    /// PHAssetResource 没有公开的 fileSize 属性，用 KVC 读取（社区通行做法），取不到按 0 估算。
+    static func fileSize(of resource: PHAssetResource) -> Int64 {
+        (resource.value(forKey: "fileSize") as? NSNumber)?.int64Value ?? 0
     }
 
     static func assetInfoKey(for asset: PHAsset) -> String {
