@@ -27,6 +27,9 @@ jobs:
         working-directory: ios/App
         run: |
           brew install xcodegen
+          # 把 CI 构建号打进 Info.plist（PEBuild），App 首页显示「构建 #N」，
+          # 用户一眼可验证装的是不是最新版
+          export PE_BUILD="${GITHUB_RUN_NUMBER}"
           xcodegen generate
 
       - name: Build device app (unsigned)

@@ -67,6 +67,12 @@ final class AppState: ObservableObject {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
+    /// CI 构建号（Info.plist PEBuild，workflow 注入）；本地开发显示 dev。
+    var buildLabel: String {
+        let build = Bundle.main.object(forKey: "PEBuild") as? String ?? ""
+        return build.isEmpty ? "dev" : "#\(build)"
+    }
+
     var manifestURL: URL {
         documentsURL.appendingPathComponent("manifest.csv")
     }
@@ -78,6 +84,7 @@ final class AppState: ObservableObject {
     private func bootstrap() {
         setvbuf(stdout, nil, _IOLBF, 0) // 行缓冲：console 重定向到文件时也能逐行看到输出
         print("PE BOOT: args=\(ProcessInfo.processInfo.arguments) debug=\(_isDebugAssertConfiguration())")
+        ExportLog.write("BOOT build=\(buildLabel) args=\(ProcessInfo.processInfo.arguments.joined(separator: " "))")
         loadManifest()
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
@@ -150,6 +157,7 @@ final class AppState: ObservableObject {
         verifyResult = VerifyResult()
         UIApplication.shared.isIdleTimerDisabled = true // 屏幕常亮，保证前台稳定跑完
         print("PE EXPORT: start batchLimit=\(batchMB == 0 ? "unlimited" : "\(batchMB)MB")")
+        ExportLog.write("EXPORT start build=\(buildLabel) batchMB=\(batchMB) library=\(libraryCount) free=\(bytesString(freeBytes))")
         let engine = ExportEngine(documentsURL: documentsURL, batchBytesLimit: batchBytesLimit)
         exportEngine = engine
         engine.onPlanning = { [weak self] scanned, total in
@@ -178,6 +186,9 @@ final class AppState: ObservableObject {
             self.lastFinished = summary
             self.progress.currentFile = ""
             print("PE EXPORT: finish ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped) cancelled=\(summary.cancelled)")
+            ExportLog.write("EXPORT finish ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped)"
+                            + " cancelled=\(summary.cancelled) batchLimited=\(summary.batchLimited)"
+                            + " stopped=\(summary.stoppedReason ?? "-")")
             self.loadManifest()
             self.refreshFreeSpace() // 预估只算一次，这里只刷新剩余空间
         }
@@ -228,6 +239,7 @@ final class AppState: ObservableObject {
                 do { try ManifestStore.append(url: manifestURL, rows: pulledRows) } catch { /* 下次重试 */ }
             }
             print("PE CLEAN: cleaned=\(result.cleaned) absent=\(result.absent) failed=\(result.failed) freed=\(result.bytes)")
+            ExportLog.write("CLEAN cleaned=\(result.cleaned) absent=\(result.absent) failed=\(result.failed) freed=\(result.bytes)")
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.cleaning = false
@@ -301,6 +313,7 @@ final class AppState: ObservableObject {
                 self.verifying = false
                 self.verifyResult = result
                 print("PE VERIFY: checked=\(result.checked) missing=\(result.missing.count) mismatch=\(result.mismatch.count)")
+                ExportLog.write("VERIFY checked=\(result.checked) missing=\(result.missing.count) mismatch=\(result.mismatch.count)")
             }
         }
     }

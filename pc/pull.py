@@ -136,9 +136,24 @@ async def amain(args: argparse.Namespace) -> int:
 
     await walk_dir("")
     known = {r.relative_path for r in expected}
-    orphans = [p for p in device_files if p != pe_common.MANIFEST_NAME and p not in known]
+    diagnostics = {"export-log.txt", "export-log.old.txt"}
+    orphans = [p for p in device_files
+               if p != pe_common.MANIFEST_NAME and p not in known and p not in diagnostics]
     if orphans:
         pe_common.log(f"警告：设备上有 {len(orphans)} 个清单外文件（可能是上次失败残留），已跳过不拉。")
+
+    # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里
+    for diag in sorted(diagnostics):
+        if diag not in device_files:
+            continue
+        try:
+            data = await house.get_file_contents(diag)
+        except Exception as error:
+            pe_common.log(f"拉取诊断日志失败 {diag}：{error}")
+            continue
+        target = dest / f"device-{diag}"
+        target.write_bytes(data)
+        pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
 
     # 3) 逐文件拉取 + 校验
     report: list[dict] = []

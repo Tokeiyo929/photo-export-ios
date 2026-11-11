@@ -87,6 +87,7 @@ final class ExportEngine {
         do {
             sweepTmpLeftovers() // 上次崩溃可能遗留半成品 tmp，清掉（保留崩溃游标）
             let (rows, _) = ManifestStore.load(url: manifestURL)
+            ExportLog.write("RUN start batchLimit=\(batchBytesLimit) manifestRows=\(dict.count) free=\(bytesString(freeSpaceBytes() ?? 0))")
             let dict = ManifestStore.rowDictionary(of: rows)
             var doneSet = Set<String>()
             // assetId -> (photo/video -> [已完成的相对路径，按追加顺序])
@@ -119,6 +120,7 @@ final class ExportEngine {
                 // 空间护栏：写不下这个文件就停批，避免刷一屏"磁盘满"FAIL
                 if let free = freeSpaceBytes(), free < item.planned.fileSize + freeSpaceReserve {
                     summary.stoppedReason = "剩余空间不足（剩 \(bytesString(free))，导 \(bytesString(item.planned.fileSize)) 需预留护栏）。本批到此为止：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
+                    ExportLog.write("GUARD free=\(free) need=\(item.planned.fileSize + freeSpaceReserve) → 停批")
                     break
                 }
                 let path = item.planned.relativePath
@@ -135,6 +137,7 @@ final class ExportEngine {
                     let previous = readCursor()
                     let starts = (previous.path == path) ? previous.starts + 1 : 1
                     if starts >= 3 {
+                        ExportLog.write("FILE-SKIP \(path) starts=\(starts)")
                         var row = baseRow(item)
                         row.status = "FAIL"
                         row.note = "连续 \(starts) 次导出未完成（疑似该文件触发系统崩溃），本批已跳过"
@@ -148,7 +151,7 @@ final class ExportEngine {
                         continue
                     }
                     writeCursor(CrashCursor(path: path, starts: starts))
-                    let row = try exportOne(item: item, manifestURL: manifestURL)
+                    let row = try autoreleasepool { try exportOne(item: item, manifestURL: manifestURL) }
                     clearCursor() // 活着走完这个文件，解除怀疑
                     if row.status == "OK" {
                         doneSet.insert(path)
@@ -160,10 +163,16 @@ final class ExportEngine {
                         progress.failedFiles += 1
                     }
                     progress.bytesDone += row.size
+                    if row.status == "OK" {
+                        ExportLog.write("FILE OK \(path) size=\(row.size)")
+                    } else {
+                        ExportLog.write("FILE \(row.status) \(path) — \(row.note)")
+                    }
                     let snapshot = progress
                     main { self.onFileDone?(row, snapshot) }
                 } catch {
                     clearCursor() // exportOne 抛错但进程活着，也解除怀疑（FAIL 已记录，下轮重试）
+                    ExportLog.write("FILE ERR \(path) diskFull=\(isDiskFull(error)) — \(String(error.localizedDescription.prefix(120)))")
                     var row = baseRow(item)
                     row.status = "FAIL"
                     row.note = String(error.localizedDescription.prefix(200))
@@ -176,6 +185,7 @@ final class ExportEngine {
                     if isDiskFull(error) {
                         // 盘真的满了：继续只会刷 FAIL + 系统卡死，优雅收批
                         summary.stoppedReason = "磁盘写满，本批到此为止（不是错误）：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
+                        ExportLog.write("DISK-FULL 停批 free=\(bytesString(freeSpaceBytes() ?? 0))")
                         break
                     }
                 }
@@ -187,6 +197,9 @@ final class ExportEngine {
         }
         clearCursor() // 本次是正常收尾（含取消/护栏/写满），崩溃怀疑清零
         clearPlanCursor()
+        ExportLog.write("FINISH ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped)"
+                        + " cancelled=\(summary.cancelled) batchLimited=\(summary.batchLimited)"
+                        + " stopped=\(summary.stoppedReason ?? "-") errors=\(summary.errors.count)")
         let finished = summary
         main { self.onFinish?(finished) }
     }
@@ -268,18 +281,23 @@ final class ExportEngine {
             if scanned % 200 == 0 || scanned == total {
                 let seen = scanned
                 let all = total
+                let plannedBytes = batchBytes
+                ExportLog.write("PLAN \(seen)/\(all) batchBytes=\(plannedBytes)")
                 main { self.onPlanning?(seen, all) }
             }
             let starts = (planCursor.index == index && planCursor.assetId == asset.localIdentifier)
                 ? planCursor.starts + 1 : 1
             if starts >= 3 {
+                ExportLog.write("PLAN-SKIP index=\(index) id=\(asset.localIdentifier.prefix(24)) starts=\(starts)")
                 planCursor = PlanCursor()
                 clearPlanCursor()
                 continue
             }
             planCursor = PlanCursor(index: index, assetId: asset.localIdentifier, starts: starts)
             writePlanCursor(planCursor)
-            let resources = PhotoLibraryService.exportResources(for: asset)
+            // autoreleasepool：PhotoKit 的临时对象随批释放，不在 GCD 线程上堆积
+            // （开源批量导出项目的通行做法）
+            let resources = autoreleasepool { PhotoLibraryService.exportResources(for: asset) }
             guard !resources.isEmpty else { continue }
             let (directory, source) = ExportPlanner.dateDirectory(creationDate: asset.creationDate,
                                                                   fileDate: asset.modificationDate,
@@ -298,7 +316,7 @@ final class ExportEngine {
                 }
                 let fileName = ExportPlanner.disambiguate(fileName: resource.originalFilename,
                                                           directory: directory, used: &used)
-                let size = PhotoLibraryService.fileSize(of: resource)
+                let size = autoreleasepool { PhotoLibraryService.fileSize(of: resource) }
                 items.append(WorkItem(asset: asset, resource: resource,
                                       planned: PlannedFile(relativePath: directory + "/" + fileName,
                                                            fileName: fileName,

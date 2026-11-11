@@ -36,6 +36,9 @@ struct HomeView: View {
             Text("字节级复制 · SHA-256 可证明 · 按拍摄日期归档")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
+            Text("构建 \(state.buildLabel) · 工作日志 export-log.txt 在「文件」里可见")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
     }
 
