@@ -13,6 +13,7 @@ struct HomeView: View {
                     libraryCard
                     exportSection
                     cleanCard
+                    wifiCard
                     rulesCard
                 }
                 .padding(16)
@@ -296,6 +297,48 @@ struct HomeView: View {
         if result.absent > 0 { text += "，\(result.absent) 个本就不在（改记 PULLED）" }
         if result.failed > 0 { text += "，\(result.failed) 个删除失败（保持 OK，下次再试）" }
         return text
+    }
+
+    /// WiFi 直传：iOS 27 数据线 AFC 通道对本 App 服务了错误的容器视图，
+    /// WiFi 拉取（LocalSend 同款模式）是可靠通道，且通常比数据线快。
+    private var wifiCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("WiFi 直传到电脑", systemImage: "wifi")
+                .font(.headline)
+            if state.wifiRunning {
+                if state.wifiURLs.isEmpty {
+                    Text("已启动，但没拿到局域网 IP——确认手机连的是 WiFi（不是蜂窝网络）。")
+                        .font(.footnote)
+                        .foregroundColor(.orange)
+                } else {
+                    ForEach(state.wifiURLs, id: \.self) { url in
+                        Text(url)
+                            .font(.footnote.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    Text("手机与电脑要在同一网络（电脑网线接同一路由器也行），然后二选一：\n① 命令行运行 pull.py --wifi 上面地址 --dest 目标目录（自动按清单拉取并校验哈希）\n② 浏览器打开上面地址手动下载（/list 看全部文件）\n台式机没无线网卡：手机开「个人热点」+ 数据线连电脑（装了 iTunes 自带 USB 网卡驱动），从上往下试上面列出的地址。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+                Button("关闭 WiFi 传图") { state.stopWifiServer() }
+                    .buttonStyle(.bordered)
+            } else {
+                Text("数据线通道在你这台机抽风（系统把沙盒视图指错了容器）。开启后手机变成一台小型文件服务器，电脑通过 WiFi 直接拉取，推荐用起来。")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                Button {
+                    state.startWifiServer()
+                } label: {
+                    Label("开启 WiFi 传图", systemImage: "dot.radiowaves.left.and.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
     }
 
     private var rulesCard: some View {

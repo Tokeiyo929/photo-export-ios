@@ -62,7 +62,11 @@ final class AppState: ObservableObject {
 
     private var exportEngine: ExportEngine?
     private var keepAwakeTimer: Timer?
+    private var wifiServer: WifiServer?
     private var autoTestScheduled = false
+
+    @Published var wifiRunning = false
+    @Published var wifiURLs: [String] = []
 
     var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -223,6 +227,27 @@ final class AppState: ObservableObject {
     func reassertKeepAwakeIfNeeded() {
         guard exportRunning else { return }
         UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    // MARK: - WiFi 直传
+
+    /// 局域网 HTTP 直传：iOS 27 的数据线 AFC 通道对本 App 服务了错误的容器视图
+    /// （按名读永远 OBJECT_NOT_FOUND），WiFi 是可用的拉取通道（LocalSend 同款模式）。
+    func startWifiServer() {
+        guard !wifiRunning else { return }
+        let server = WifiServer(documentsURL: documentsURL, port: 8765)
+        server.start()
+        wifiServer = server
+        wifiRunning = true
+        wifiURLs = server.localURLs
+        ExportLog.write("WIFI start urls=\(server.localURLs.joined(separator: " "))")
+    }
+
+    func stopWifiServer() {
+        wifiServer?.stop()
+        wifiServer = nil
+        wifiRunning = false
+        wifiURLs = []
     }
 
     // MARK: - 清理已拉取

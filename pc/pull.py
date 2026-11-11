@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+import time
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -50,6 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="数据线拉取 App 导出的原片并校验哈希")
     parser.add_argument("--list", action="store_true", help="列出已连接设备")
     parser.add_argument("--udid", help="设备 serial（多台时用 --list 查看）")
+    parser.add_argument("--wifi", metavar="URL",
+                        help="WiFi 直传：App 首页「WiFi 传图」显示的地址（如 http://192.168.1.5:8765）。"
+                             "台式机没网卡时：手机开个人热点+数据线连电脑，用 App 列出的 172.20.10.x 地址")
     parser.add_argument("--app", default=DEFAULT_BUNDLE, help=f"App bundle id（默认 {DEFAULT_BUNDLE}）")
     parser.add_argument("--dest", help="拉取目标目录")
     parser.add_argument("--zip", action="store_true", help="校验通过后打仅存储 ZIP")
@@ -79,6 +84,134 @@ async def list_devices() -> int:
         except Exception as error:  # 设备可能锁着配对
             pe_common.log(f"serial={device.serial}  （读取信息失败：{error}）")
     return 0
+
+
+# MARK: WiFi 直传模式（App 内置局域网 HTTP 服务）。
+# 背景：iOS 27 上数据线 AFC 通道对本 App 服务了错误的容器视图（按名读永远
+# OBJECT_NOT_FOUND）；WiFi 拉取（LocalSend 同款模式）是可靠通道。台式机没无线
+# 网卡时走「手机个人热点 + 数据线」的 USB 网卡（172.20.10.x），一根线全搞定。
+
+
+def _http_get(url: str, timeout: int = 30) -> bytes:
+    import urllib.request
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return response.read()
+        except Exception as error:  # 连接抖动重试（与 AFC 同样待遇）
+            last_error = error
+            if attempt < 2:
+                time.sleep(1.5)
+    assert last_error is not None
+    raise last_error
+
+
+def _http_download(url: str, target: Path, timeout: int = 60) -> None:
+    """流式下载到 <target>.part 再原子改名：中断不产生半截假文件，重跑自动重来。"""
+    import shutil
+    import urllib.request
+    part = target.with_name(target.name + ".part")
+    with urllib.request.urlopen(url, timeout=timeout) as response, open(part, "wb") as handle:
+        shutil.copyfileobj(response, handle)
+    part.replace(target)
+
+
+def wifi_pull(args: argparse.Namespace) -> int:
+    base = args.wifi.rstrip("/")
+    dest = Path(args.dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    pe_common.log(f"WiFi 直传：{base}")
+
+    # 1) 清单
+    try:
+        manifest_bytes = _http_get(base + "/manifest.csv")
+    except Exception as error:
+        pe_common.log(f"拉取 manifest.csv 失败：{error}")
+        pe_common.log("确认：①App 首页已点「开启 WiFi 传图」②地址与 App 显示一致 ③手机和电脑同一网络"
+                      "（台式机可用手机个人热点+数据线的 172.20.10.x 地址）")
+        return 2
+    rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
+    expected = pe_common.pullable_rows(rows)
+    pulled_note = ""
+    if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
+        pulled_note = "（PULLED 的已拉取清理，跳过）"
+    pe_common.log(f"清单：待拉取 {len(expected)} 个文件{pulled_note}"
+                  + (f"，损坏行 {malformed}" if malformed else ""))
+
+    # 2) 诊断日志顺带拉回（不参与校验）
+    for diag in ("export-log.txt", "export-log.old.txt"):
+        try:
+            data = _http_get(base + "/" + diag)
+        except Exception:
+            continue
+        target = dest / f"device-{diag}"
+        target.write_bytes(data)
+        pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
+
+    # 3) 逐文件拉取 + 校验（续跑语义与数据线模式一致）
+    report: list[dict] = []
+    summary = pe_common.VerifySummary()
+    done = 0
+    for row in expected:
+        done += 1
+        rel = row.relative_path
+        target = pe_common.local_path(dest, rel)
+        prefix = f"[{done}/{len(expected)}]"
+        # 续跑：本地已有且大小一致（--fast-resume 直接认；默认再验哈希）
+        if target.exists() and target.stat().st_size == row.size:
+            if args.fast_resume:
+                summary.skipped_verified += 1
+                summary.total_bytes += row.size
+                report.append(pe_common._report_row(rel, row.sha256, "(fast-resume)", row.size,
+                                                    "SKIP-VERIFIED", "同大小，未重算哈希"))
+                pe_common.log(f"{prefix} SKIP  {rel}")
+                continue
+            if pe_common.sha256_file(target) == row.sha256:
+                summary.skipped_verified += 1
+                summary.total_bytes += row.size
+                report.append(pe_common._report_row(rel, row.sha256, row.sha256, row.size,
+                                                    "SKIP-VERIFIED", "已存在且哈希一致"))
+                pe_common.log(f"{prefix} SKIP  {rel}")
+                continue
+        url = base + "/file/" + urllib.parse.quote(rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _http_download(url, target)
+        except Exception as error:
+            summary.failed += 1
+            report.append(pe_common._report_row(rel, row.sha256, "", 0, "ERROR", f"WiFi 拉取失败：{error}"))
+            pe_common.log(f"{prefix} ERROR {rel} —— {error}")
+            continue
+        actual_sha = pe_common.sha256_file(target)
+        actual_size = target.stat().st_size
+        if actual_size != row.size or actual_sha != row.sha256:
+            summary.failed += 1
+            report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "FAIL",
+                                                "拉取后哈希不一致"))
+            pe_common.log(f"{prefix} FAIL  {rel}")
+        else:
+            summary.passed += 1
+            summary.total_bytes += actual_size
+            report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "PASS", ""))
+            pe_common.log(f"{prefix} PASS  {rel}  ({pe_common.bytes_str(actual_size)})")
+
+    # 4) 报告与总结
+    report_path = pe_common.default_report_path(dest)
+    pe_common.write_report(report, report_path)
+    pe_common.log(f"报告：{report_path}")
+    pe_common.log(f"结果：PASS {summary.passed} · 已验证跳过 {summary.skipped_verified} · "
+                  f"FAIL {summary.failed} · 总量 {pe_common.bytes_str(summary.total_bytes)}")
+
+    # 5) 护甲 ZIP
+    if args.zip:
+        if summary.failed:
+            pe_common.log("有 FAIL 项，跳过打包（先解决失败再 --zip）。")
+        else:
+            zip_path = dest.parent / f"照片导出-{pe_common.stamp()}.zip"
+            count, zipped = pe_common.make_store_zip(dest, zip_path)
+            pe_common.log(f"仅存储 ZIP：{zip_path}（{count} 个文件，{pe_common.bytes_str(zipped)}，字节未动）")
+    return 0 if summary.ok else 1
 
 
 async def amain(args: argparse.Namespace) -> int:
@@ -277,6 +410,8 @@ def main() -> int:
     if not args.dest:
         pe_common.log("需要 --dest 目标目录（或用 --list 先看设备）。")
         return 2
+    if args.wifi:
+        return wifi_pull(args)
     try:
         return asyncio.run(amain(args))
     except KeyboardInterrupt:

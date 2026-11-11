@@ -3,10 +3,14 @@
 运行：python -m unittest discover -s pc -p 'test_*.py'"""
 from __future__ import annotations
 
+import argparse
 import csv
 import hashlib
+import http.server
 import io
+import threading
 import unittest
+import urllib.parse
 import zipfile
 from pathlib import Path
 
@@ -170,6 +174,103 @@ class StoreZipTest(unittest.TestCase):
             self.assertEqual(len(infos), 1)
             self.assertEqual(infos[0].compress_type, zipfile.ZIP_STORED)
             self.assertEqual(archive.read(infos[0]), payload)  # 字节原封不动
+
+
+class _WifiFixtureHandler(http.server.BaseHTTPRequestHandler):
+    """最小 WiFi 服务回路：/manifest.csv、/file/<rel>，从 fixture 目录读。"""
+    root: Path = Path(".")
+
+    def do_GET(self):
+        if self.path == "/manifest.csv":
+            self._send((self.root / "manifest.csv").read_bytes())
+        elif self.path.startswith("/file/"):
+            rel = urllib.parse.unquote(self.path[len("/file/"):])
+            try:
+                self._send((self.root / rel).read_bytes())
+            except OSError:
+                self.send_error(404)
+        else:
+            self.send_error(404)
+
+    def _send(self, data: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass  # 静音测试输出
+
+
+class WifiPullTest(unittest.TestCase):
+    def _row(self, rel: str, data: bytes) -> str:
+        # 与 App 端写法一致：含逗号的文件名要 csv 转义（引号包裹）
+        sha = hashlib.sha256(data).hexdigest()
+        fields = [rel, str(len(data)), sha, "creation", "ASSET-1", "photo", "0", "OK",
+                  "2026-11-10T00:00:00Z", ""]
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="").writerow(fields)
+        return buffer.getvalue()
+
+    def _run_wifi(self, root: Path, dest: Path) -> int:
+        import contextlib
+        import pull
+        handler = type("H", (_WifiFixtureHandler,), {"root": root})
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}"
+            args = argparse.Namespace(wifi=url, dest=str(dest), fast_resume=False, zip=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                return pull.wifi_pull(args)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_wifi_pull_pass_and_verify(self):
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="pe-wifi-root"))
+        dest = Path(tempfile.mkdtemp(prefix="pe-wifi-dest"))
+        rows = []
+        payloads = {
+            "2024/2024-11-24/IMG_1.HEIC": b"heic-bytes-\x00\xff" * 10,
+            "2026/2026-03-15/照片, 一.MOV": b"mov-bytes-\x01\x02" * 5,  # 中文名+逗号+空格
+        }
+        for rel, data in payloads.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_bytes(data)
+            rows.append(self._row(rel, data))
+        (root / "manifest.csv").write_bytes(b"\xef\xbb\xbf" + HEADER.encode("utf-8") + b"\n"
+                                            + "".join(r + "\n" for r in rows).encode("utf-8"))
+        rc = self._run_wifi(root, dest)
+        self.assertEqual(rc, 0)
+        for rel, data in payloads.items():
+            self.assertEqual((dest / rel).read_bytes(), data)
+        reports = sorted(dest.glob("export-report-*.csv"))
+        self.assertTrue(reports, "报告未生成")
+        with open(reports[-1], encoding="utf-8-sig") as handle:
+            statuses = [r["result"] for r in csv.DictReader(handle)]
+        self.assertEqual(statuses.count("PASS"), 2)
+
+    def test_wifi_pull_hash_mismatch_fails(self):
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="pe-wifi-root2"))
+        dest = Path(tempfile.mkdtemp(prefix="pe-wifi-dest2"))
+        rel = "2024/a.HEIC"
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(b"actual-bytes")
+        # 清单声明的是另一份数据的哈希 → 服务端文件被篡改 → 必须 FAIL
+        rows = [self._row(rel, b"declared-bytes")]
+        (root / "manifest.csv").write_bytes(b"\xef\xbb\xbf" + HEADER.encode("utf-8") + b"\n"
+                                            + "".join(r + "\n" for r in rows).encode("utf-8"))
+        rc = self._run_wifi(root, dest)
+        self.assertEqual(rc, 1)
+        reports = sorted(dest.glob("export-report-*.csv"))
+        self.assertTrue(reports, "报告未生成")
+        with open(reports[-1], encoding="utf-8-sig") as handle:
+            statuses = [r["result"] for r in csv.DictReader(handle)]
+        self.assertEqual(statuses, ["FAIL"])
 
 
 if __name__ == "__main__":

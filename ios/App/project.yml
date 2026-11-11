@@ -38,8 +38,9 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        NSPhotoLibraryUsageDescription: 需要读取相册原片字节（HEIC/JPEG/MOV 保持原始格式，不做任何转码），导出到 App 文件目录后经数据线传到电脑。
+        NSPhotoLibraryUsageDescription: 需要读取相册原片字节（HEIC/JPEG/MOV 保持原始格式，不做任何转码），导出到 App 文件目录后传到电脑。
         NSPhotoLibraryAddUsageDescription: 仅在需要保存导出报告时写入相册（当前版本不使用）。
+        NSLocalNetworkUsageDescription: 用于在家庭 WiFi 里把已导出的照片直接传到电脑（电脑运行 pull.py --wifi 或浏览器打开显示的地址）。仅限同一局域网，勿在公共 WiFi 开启。
 
   # 无人值守 CI 授权：iOS 26 模拟器上宿主侧预授权（simctl privacy / TCC.db）对 readWrite 无效，
   # 只有权限弹窗能落授权；用 XCUITest interruption monitor 替人点"允许"。

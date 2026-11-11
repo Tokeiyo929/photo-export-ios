@@ -67,11 +67,14 @@ relative_path,size,sha256,date_source,asset_id,media_type,favorite,status,export
 1. 到仓库 Releases 下载 `photo-export-unsigned.ipa`
 2. Windows 上用 [Sideloadly](https://sideloadly.io)（或 AltStore）+ Apple ID 重签后安装到手机
 
-## PC 端：三条拉取路径
+## PC 端：拉取路径
 
 App 已开启 iTunes 文件共享（`UIFileSharingEnabled`），原片都在沙盒 `Documents/` 下。
+懒得记命令就双击仓库根目录的 **拉取.bat**（菜单选数据线或 WiFi，参数可通过命令行尾追加，如 `拉取.bat --zip`）。
 
 ### 方式 A：数据线脚本（推荐）
+
+> iOS 27 真机注意：重签名 App 的 house_arrest/AFC 通道可能服务错误的容器视图——症状是「目录都列得出来，按名读永远 OBJECT_NOT_FOUND」。这是生态级问题（libimobiledevice#1490），此时换 **方式 D：WiFi 直传**。
 
 ```sh
 pip install -r pc/requirements.txt
@@ -104,6 +107,19 @@ python pc/pull.py --dest D:\相册导出 --zip
 
 生成 **ZIP_STORED 仅存储模式**包（字节原封不动，只加目录和 CRC32），微信发这个 zip 给自己/电脑，解压后 `python pc/verify.py 解压目录` 再验一次即可。**红线：不要用微信/QQ 直接发原图文件、不要用网盘「极速上传」**。
 
+### 方式 D：WiFi 直传（数据线 AFC 失效时的主路）
+
+手机 App 首页开「WiFi 传图」→ 屏幕列出本机局域网地址（多网卡全列，家庭 WiFi/个人热点都覆盖）→ 电脑同一 WiFi 下：
+
+```sh
+python pc/pull.py --wifi http://192.168.1.5:8765 --dest D:\相册导出
+```
+
+- 拉取+逐文件 SHA-256 校验+报告，与方式 A 完全同一条流水线（清单哈希就是防篡改证明，HTTP 明文也不怕）
+- 台式机没无线网卡：手机开**个人热点 + 数据线连电脑**（USB 走的就是网卡），用 App 列表里的 `172.20.10.x` 地址
+- 断了重跑同一条命令即续跑（已验证文件跳过）；App 端 1MB 分块流式发送，大 MOV 不吃内存
+- 安全边界：无鉴权，仅限家庭/个人热点 WiFi 用，别在公共 WiFi 开
+
 ## 本地开发
 
 ```sh
@@ -124,7 +140,7 @@ PC 端测试（Windows 即可真跑）：`python -m unittest discover -s pc -p '
 
 1. Sideloadly 装好后打开 App，允许相册访问
 2. 先拿 10 张小图试导出 → 记录页全 OK
-3. 数据线连电脑，`python pc/pull.py --dest D:\试导出` → 全 PASS
+3. 数据线连电脑，`python pc/pull.py --dest D:\试导出` → 全 PASS（报 OBJECT_NOT_FOUND 就走 WiFi 直传，见方式 D）
 4. 抽 1 张人工抽查：`certutil -hashfile 文件 SHA256` 与 manifest.csv 里那行一致
 5. `--zip` 后微信把 zip 发给自己，PC 解压再 `verify.py` 通过
 6. 全量大库：用「每批导出上限」分批走 导出 → 拉取全 PASS → 清理 的循环（见上文「大相册：分批导出」）；锁屏前留在导出页（App 会保持常亮），中途断开的话重跑 pull.py 即续跑
