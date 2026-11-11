@@ -45,7 +45,7 @@ struct HomeView: View {
                 .font(.headline)
                 .foregroundColor(state.authorization == .denied ? .red : .primary)
             if state.authorization == .authorized || state.authorization == .limited {
-                Text("相册 \(state.libraryCount) 项 · 预计 \(state.estimating ? "统计中…" : bytesString(state.estimatedBytes))")
+                Text(librarySummary)
                     .font(.subheadline)
                 Text("本 App 可用空间 \(bytesString(state.freeBytes))")
                     .font(.footnote)
@@ -66,6 +66,12 @@ struct HomeView: View {
         .padding(14)
         .background(Color(.systemGray6))
         .cornerRadius(12)
+    }
+
+    private var librarySummary: String {
+        if state.estimating { return "相册 \(state.libraryCount) 项 · 预计统计中…" }
+        if state.estimatedBytes > 0 { return "相册 \(state.libraryCount) 项 · 预计 \(bytesString(state.estimatedBytes))" }
+        return "相册 \(state.libraryCount) 项 · 大库分批模式（逐批显示大小）"
     }
 
     private var permissionText: String {

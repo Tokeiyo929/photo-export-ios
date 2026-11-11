@@ -109,8 +109,12 @@ final class AppState: ObservableObject {
     }
 
     private func refreshEstimate() {
-        // 全库容量预估要逐资产扫资源，大库要跑好几分钟：只估一次，之后不再重复扫
+        // 全库容量预估要逐资产扫资源。两个约束：
+        // 1) 大库要扫好几分钟，只估一次
+        // 2) 大库干脆不扫：与导出规划的 PhotoKit 扫描并发会竞态（真机 32487 张上
+        //    规划阶段 EXC_BREAKPOINT 的头号嫌疑），分批模式下引擎逐批报大小，预估没用
         guard !estimating, estimatedBytes == 0 else { return }
+        guard libraryCount > 0, libraryCount <= 2000 else { return }
         estimating = true
         Task.detached(priority: .utility) { [weak self] in
             let bytes = PhotoLibraryService.estimatedLibraryBytes()

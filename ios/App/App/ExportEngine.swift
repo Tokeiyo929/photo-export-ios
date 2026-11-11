@@ -186,6 +186,7 @@ final class ExportEngine {
             summary.errors.append("规划失败 — " + error.localizedDescription)
         }
         clearCursor() // 本次是正常收尾（含取消/护栏/写满），崩溃怀疑清零
+        clearPlanCursor()
         let finished = summary
         main { self.onFinish?(finished) }
     }
@@ -257,6 +258,9 @@ final class ExportEngine {
         var batchBytes: Int64 = 0
         // 每资产的可变剩余完成表
         var remaining = doneByAsset
+        // 规划段崩溃豁免：处理每个资产前写「该资产第几次尝试」；
+        // 进程若死在某个资产上，下轮同一资产第 3 次启动即跳过（坏资产不卡死最后一批）
+        var planCursor = readPlanCursor()
         for index in 0..<total {
             if cancelled { throw CancellationError() }
             let asset = fetch.object(at: index)
@@ -266,6 +270,15 @@ final class ExportEngine {
                 let all = total
                 main { self.onPlanning?(seen, all) }
             }
+            let starts = (planCursor.index == index && planCursor.assetId == asset.localIdentifier)
+                ? planCursor.starts + 1 : 1
+            if starts >= 3 {
+                planCursor = PlanCursor()
+                clearPlanCursor()
+                continue
+            }
+            planCursor = PlanCursor(index: index, assetId: asset.localIdentifier, starts: starts)
+            writePlanCursor(planCursor)
             let resources = PhotoLibraryService.exportResources(for: asset)
             guard !resources.isEmpty else { continue }
             let (directory, source) = ExportPlanner.dateDirectory(creationDate: asset.creationDate,
@@ -295,9 +308,11 @@ final class ExportEngine {
                 batchBytes += size
             }
             if batchBytesLimit > 0 && batchBytes >= batchBytesLimit {
+                clearPlanCursor() // 规划正常收官，豁免计数清零（拷贝阶段的死亡不该算到资产头上）
                 return true
             }
         }
+        clearPlanCursor()
         return false
     }
 
@@ -364,11 +379,43 @@ final class ExportEngine {
         try? FileManager.default.removeItem(at: cursorURL)
     }
 
-    /// 清掉上次崩溃遗留的半成品 tmp（导出中的 UUID-文件名），游标保留。
+    // MARK: - 规划段崩溃游标
+
+    /// 与拷贝段游标同理，但按「资产下标 + localIdentifier」记。
+    /// 只有扫到全库尾部（预算装得下剩余全库）才会经历完整扫描，坏资产只会在那里撞上。
+    private struct PlanCursor {
+        var index = -1
+        var assetId = ""
+        var starts = 0
+    }
+
+    private var planCursorURL: URL {
+        tmpDirURL.appendingPathComponent("plan-cursor.txt")
+    }
+
+    private func readPlanCursor() -> PlanCursor {
+        guard let raw = try? String(contentsOf: planCursorURL, encoding: .utf8) else { return PlanCursor() }
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 3, let index = Int(lines[0]), let starts = Int(lines[2]) else { return PlanCursor() }
+        return PlanCursor(index: index, assetId: lines[1], starts: starts)
+    }
+
+    private func writePlanCursor(_ cursor: PlanCursor) {
+        try? FileManager.default.createDirectory(at: tmpDirURL, withIntermediateDirectories: true)
+        let text = "\(cursor.index)\n\(cursor.assetId)\n\(cursor.starts)"
+        try? text.data(using: .utf8)?.write(to: planCursorURL, options: .atomic)
+    }
+
+    private func clearPlanCursor() {
+        try? FileManager.default.removeItem(at: planCursorURL)
+    }
+
+    /// 清掉上次崩溃遗留的半成品 tmp（导出中的 UUID-文件名），两类游标保留。
     private func sweepTmpLeftovers() {
         let contents = (try? FileManager.default.contentsOfDirectory(at: tmpDirURL,
                                                                      includingPropertiesForKeys: nil)) ?? []
-        for item in contents where item.lastPathComponent != "cursor.txt" {
+        let keep: Set<String> = ["cursor.txt", "plan-cursor.txt"]
+        for item in contents where !keep.contains(item.lastPathComponent) {
             try? FileManager.default.removeItem(at: item)
         }
     }
