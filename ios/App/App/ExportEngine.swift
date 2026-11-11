@@ -117,7 +117,7 @@ final class ExportEngine {
                 if cancelled { summary.cancelled = true; break }
                 // 按 ID 现取资产（成熟导出器同款：拷贝期才解析，规划期不囤对象）
                 watchdog.touch(phase: "copy", detail: "asset#\(assetIndex) call=refetch", assetId: assetId)
-                guard let asset = autoreleasepool({ PhotoLibraryService.asset(withId: assetId) }) else {
+                guard let asset = autoreleasepool(invoking: { PhotoLibraryService.asset(withId: assetId) }) else {
                     ExportLog.write("ASSET-GONE index=\(assetIndex) id=\(assetId)")
                     progress.skippedFiles += 1
                     continue
