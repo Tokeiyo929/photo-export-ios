@@ -24,6 +24,27 @@ import pe_common  # noqa: E402
 
 DEFAULT_BUNDLE = "com.tokeiyo929.photoexport"
 
+# 上次解析成功的完整 bundle id 缓存（与脚本同目录）：枚举服务再抽风也能续命
+CACHE_NAME = ".resolved-app.txt"
+
+
+def cache_path() -> Path:
+    return Path(__file__).resolve().parent / CACHE_NAME
+
+
+def read_cache() -> str:
+    try:
+        return cache_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def write_cache(bundle: str) -> None:
+    try:
+        cache_path().write_text(bundle + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="数据线拉取 App 导出的原片并校验哈希")
@@ -75,20 +96,32 @@ async def amain(args: argparse.Namespace) -> int:
 
     # 解析实际 bundle id：Sideloadly 免签重签会在原 id 后追加团队后缀
     # （如 com.tokeiyo929.photoexport.FBTKZ8C6QB），先精确匹配再前缀匹配。
-    # 枚举连接偶尔被系统掐断（Connection was terminated abruptly），重试 3 次。
+    # 枚举连接常被系统掐断（Connection was terminated abruptly）：
+    # 每次尝试新建独立 lockdown 会话（被掐过的旧会话可能已坏），共 5 次、间隔 2s；
+    # 全失败则退回上次解析成功的缓存 id（.resolved-app.txt，与脚本同目录）。
     bundle = args.app
     installed = None
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(5):
         try:
-            installed = await InstallationProxyService(lockdown).get_apps()
+            enum_lockdown = await create_using_usbmux(serial=args.udid)
+            try:
+                installed = await InstallationProxyService(enum_lockdown).get_apps()
+            finally:
+                await enum_lockdown.close()
             break
         except Exception as error:
             last_error = error
-            if attempt < 2:
+            if attempt < 4:
                 await asyncio.sleep(2)
     if installed is None:
-        pe_common.log(f"枚举已装 App 失败（重试 3 次均失败，继续按原名尝试）：{last_error}")
+        cached = read_cache()
+        if cached:
+            pe_common.log(f"枚举已装 App 失败（重试 5 次均失败），改用上次解析成功的缓存 App id：{cached}")
+            pe_common.log(f"（枚举错误：{last_error}）")
+            bundle = cached
+        else:
+            pe_common.log(f"枚举已装 App 失败（重试 5 次均失败，按原名尝试）：{last_error}")
     elif bundle not in installed:
         candidates = sorted(b for b in installed
                             if b == args.app or b.startswith(args.app + "."))
@@ -100,10 +133,19 @@ async def amain(args: argparse.Namespace) -> int:
             for b in candidates:
                 pe_common.log(f"  {b}")
             return 2
+    if installed is not None and bundle != args.app:
+        write_cache(bundle)
 
     pe_common.log(f"打开 App 沙盒（house_arrest/VendDocuments）：{bundle}")
     # create 工厂 = 构造 + await send_command(VendDocuments)，出错自动关闭
-    house = await HouseArrestService.create(lockdown, bundle, documents_only=True)
+    try:
+        house = await HouseArrestService.create(lockdown, bundle, documents_only=True)
+    except Exception:
+        if bundle != args.app:
+            # 缓存的后缀可能已过期（换签名团队重装后缀会变）：清掉让下次重新枚举
+            cache_path().unlink(missing_ok=True)
+            pe_common.log(f"用 {bundle} 打不开沙盒，已清缓存（重跑本命令会重新枚举）。")
+        raise
 
     # 1) 读清单
     try:
