@@ -168,14 +168,14 @@ final class AppState: ObservableObject {
         }
         engine.onStart = { [weak self] total, bytes in
             guard let self else { return }
-            self.progress.totalFiles = total
+            self.progress.totalFiles = total   // 资产总数（bytes=0：总量拷贝期才知道）
             self.progress.bytesTotal = bytes
         }
         engine.onFileStarted = { [weak self] path in
             guard let self else { return }
             self.progress.currentFile = (path as NSString).lastPathComponent
         }
-        engine.onFileDone = { [weak self] _, snapshot in
+        engine.onProgress = { [weak self] snapshot in
             guard let self else { return }
             self.progress = snapshot
         }
@@ -193,7 +193,8 @@ final class AppState: ObservableObject {
             self.loadManifest()
             self.refreshFreeSpace() // 预估只算一次，这里只刷新剩余空间
         }
-        DispatchQueue.global(qos: .userInitiated).async { engine.run() }
+        // utility QoS（成熟导出器同款）：导出是长活，别跟系统前台需求抢资源
+        DispatchQueue.global(qos: .utility).async { engine.run() }
     }
 
     func cancelExport() {

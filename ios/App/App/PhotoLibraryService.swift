@@ -19,6 +19,11 @@ enum PhotoLibraryService {
         return PHAsset.fetchAssets(with: options)
     }
 
+    /// 按 ID 现取单个资产（成熟导出器同款：拷贝期才解析，规划期不囤 PHAsset 对象）。
+    static func asset(withId id: String) -> PHAsset? {
+        PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
+    }
+
     /// 挑出该资产要导出的"原始"资源：
     /// - 照片：.photo（原片字节）；RAW+JPEG 的 .alternatePhoto（非 RAW 侧）也保留
     /// - Live Photo：原片 + .pairedVideo 实况视频，成对同名导出

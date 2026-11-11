@@ -1,26 +1,28 @@
 import Foundation
 import Photos
 
-/// 导出进度快照（UI 用）。
+/// 导出进度快照（UI 用）。running 阶段按**资产**计数（一个资产可能产出 1-2 个文件，
+/// Live Photo 带实况视频）；bytesTotal 拷贝期才量得出（0 = 未知），bytesDone 按
+/// 本批新写文件的实际大小累计。
 struct ExportProgress {
-    var totalFiles = 0
-    var bytesTotal: Int64 = 0
-    var doneFiles = 0
-    var failedFiles = 0
-    var skippedFiles = 0
+    var totalFiles = 0        // 资产总数（running 期的分母）
+    var bytesTotal: Int64 = 0 // 0 = 未知
+    var doneFiles = 0         // 已完成资产数
+    var failedFiles = 0       // 失败资产数
+    var skippedFiles = 0      // 跳过资产数（已导过/无资源/已消失）
     var bytesDone: Int64 = 0
     var currentFile = ""
 
     static let empty = ExportProgress()
 }
 
-/// 一次导出的总结。
+/// 一次导出的总结（按清单行 = 文件口径，与 manifest.csv 对应）。
 struct ExportSummary {
-    var totalFiles = 0
-    var ok = 0
+    var totalFiles = 0        // 资产总数（与进度同口径）
+    var ok = 0                // 本批写成功的文件行数
     var failed = 0
-    var skipped = 0
-    var bytesTotal: Int64 = 0
+    var skipped = 0           // 消费掉的已完成文件行数（OK/PULLED）
+    var bytesTotal: Int64 = 0 // 本批实际落盘字节（逐文件累计）
     var cancelled = false
     var errors: [String] = []
     /// 本批按字节上限收尾（剩下的下次「再次导出」继续）
@@ -31,16 +33,19 @@ struct ExportSummary {
     var allGood: Bool { failed == 0 }
 }
 
-/// 导出引擎：规划 → 逐文件 tmp 写入 → SHA-256 → 移入 Documents 按日期目录 → 复算 SHA-256
-/// → 一致才记 OK，否则记 FAIL 并删除坏文件。单文件失败只记清单，不中断整体。
-/// manifest.csv 逐文件追加落盘：任意时刻被杀，已 OK 的行已在盘上，下次续跑跳过。
-/// 大库友好：规划流式扫描，达到本批字节上限即停（不再全库扫一遍）；扫描中可取消；
-/// 剩余空间低于护栏时优雅结束本批，提示先拉取清理。
+/// 导出引擎：规划（只摸元数据）→ 逐资产按 ID 现取资源 → 逐文件 tmp 写入 → SHA-256
+/// → 移入 Documents 按日期目录 → 复算 SHA-256 → 一致才记 OK，否则记 FAIL 并删除坏文件。
+/// 单文件失败只记清单，不中断整体；manifest.csv 逐文件追加落盘：任意时刻被杀，
+/// 已 OK 的行已在盘上，下次续跑跳过。
+/// 大库稳定性模式（参照成熟开源导出器 valtteriluomapareto/photo-export）：
+/// - 规划段零 assetResources/fileSize 调用（逐资产 XPC 是大库热路径头号嫌疑）
+/// - 资源解析/定名/量大小全部推迟到拷贝期，按 assetId 现取，不囤 PHAsset 对象
+/// - 剩余空间护栏与字节预算都在拷贝期收口（写完一个文件检查一次）
 final class ExportEngine {
 
     private let documentsURL: URL
     private let calendar: Calendar
-    /// 本批字节数上限（0 = 不限）。规划扫到预算即停。
+    /// 本批字节数上限（0 = 不限）。拷贝期按实际落盘字节收口。
     private let batchBytesLimit: Int64
     /// 空间护栏：剩余可用低于「本文件大小 + 预留」时结束本批。
     private let freeSpaceReserve: Int64 = 1_073_741_824 // 1 GB
@@ -65,7 +70,8 @@ final class ExportEngine {
     /// 规划扫描进度（已扫描资产数, 相册总数），扫描期间 UI 显示"扫描 x/y"
     var onPlanning: ((Int, Int) -> Void)?
     var onFileStarted: ((String) -> Void)?
-    var onFileDone: ((ManifestRow, ExportProgress) -> Void)?
+    /// 每个资产处理完推进一次（按值快照，跨线程安全）
+    var onProgress: ((ExportProgress) -> Void)?
     var onFinish: ((ExportSummary) -> Void)?
 
     private var progress = ExportProgress.empty
@@ -79,123 +85,158 @@ final class ExportEngine {
         self.watchdog = StallWatchdog(blacklistURL: tmp.appendingPathComponent("plan-blacklist.txt"))
     }
 
-    private struct WorkItem {
-        let asset: PHAsset
-        let resource: PHAssetResource
-        let planned: PlannedFile
-    }
-
     func run() {
         var summary = ExportSummary()
         let manifestURL = documentsURL.appendingPathComponent("manifest.csv")
         _ = watchdog.start()
         defer { watchdog.stop() } // 与 run 同寿；最多多活一个 20s 巡检周期
         do {
-            sweepTmpLeftovers() // 上次崩溃可能遗留半成品 tmp，清掉（保留崩溃游标）
+            sweepTmpLeftovers() // 上次崩溃可能遗留半成品 tmp，清掉（保留游标/黑名单）
             let (rows, _) = ManifestStore.load(url: manifestURL)
             let dict = ManifestStore.rowDictionary(of: rows)
             ExportLog.write("RUN start batchLimit=\(batchBytesLimit) manifestRows=\(dict.count) free=\(bytesString(freeSpaceBytes() ?? 0))")
-            var doneSet = Set<String>()
             // assetId -> (photo/video -> [已完成的相对路径，按追加顺序])
-            // 用于规划时按序消费，保证跨批重名消歧结果一致（不重导、不顶名）
-            var doneByAsset: [String: [String: [String]]] = [:]
-            for row in dict.values where row.status == "OK" || row.status == "PULLED" {
-                doneSet.insert(row.relativePath)
-                let kind = row.mediaType == "video" ? "video" : "photo"
-                doneByAsset[row.assetId, default: [:]][kind, default: []].append(row.relativePath)
-            }
+            // 拷贝期按序消费，保证跨批重名消歧结果一致（不重导、不顶名）
+            var remaining: [String: [String: [String]]] = [:]
             // 已占用的名字（OK/PULLED 的最终路径）参与重名去重
-            var used = Set(doneSet.map { $0.lowercased() })
-            var items: [WorkItem] = []
-            let truncated = try planBatch(into: &items, doneByAsset: doneByAsset, used: &used)
-            summary.batchLimited = truncated
+            var used = Set<String>()
+            for row in dict.values where row.status == "OK" || row.status == "PULLED" {
+                let kind = row.mediaType == "video" ? "video" : "photo"
+                remaining[row.assetId, default: [:]][kind, default: []].append(row.relativePath)
+                used.insert(row.relativePath.lowercased())
+            }
+            let assetIds = try planAssetIds()
 
             progress = ExportProgress()
-            progress.totalFiles = items.count
-            progress.bytesTotal = items.reduce(0) { $0 + $1.planned.fileSize }
-            summary.totalFiles = items.count
-            summary.bytesTotal = progress.bytesTotal
-            let totalBytes = progress.bytesTotal
-            main { self.onStart?(items.count, totalBytes) }
+            progress.totalFiles = assetIds.count
+            summary.totalFiles = assetIds.count
+            main { self.onStart?(assetIds.count, 0) }
 
-            for item in items {
-                if cancelled {
-                    summary.cancelled = true
-                    break
-                }
-                // 空间护栏：写不下这个文件就停批，避免刷一屏"磁盘满"FAIL
-                if let free = freeSpaceBytes(), free < item.planned.fileSize + freeSpaceReserve {
-                    summary.stoppedReason = "剩余空间不足（剩 \(bytesString(free))，导 \(bytesString(item.planned.fileSize)) 需预留护栏）。本批到此为止：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
-                    ExportLog.write("GUARD free=\(free) need=\(item.planned.fileSize + freeSpaceReserve) → 停批")
-                    break
-                }
-                let path = item.planned.relativePath
-                watchdog.touch(phase: "copy", detail: "file=\(path)")
-                if doneSet.contains(path) {
-                    summary.skipped += 1
+            var batchBytesDone: Int64 = 0
+            for (assetIndex, assetId) in assetIds.enumerated() {
+                if cancelled { summary.cancelled = true; break }
+                // 按 ID 现取资产（成熟导出器同款：拷贝期才解析，规划期不囤对象）
+                watchdog.touch(phase: "copy", detail: "asset#\(assetIndex) call=refetch", assetId: assetId)
+                guard let asset = autoreleasepool({ PhotoLibraryService.asset(withId: assetId) }) else {
+                    ExportLog.write("ASSET-GONE index=\(assetIndex) id=\(assetId)")
                     progress.skippedFiles += 1
-                    progress.bytesDone += item.planned.fileSize
                     continue
                 }
-                main { self.onFileStarted?(path) }
-                do {
-                    // 崩溃豁免：同一文件连续 3 次都没能活着导完（上个进程死在它身上），
-                    // 记 FAIL 跳过，别让一颗坏文件把整批无限卡死。
-                    let previous = readCursor()
-                    let starts = (previous.path == path) ? previous.starts + 1 : 1
-                    if starts >= 3 {
-                        ExportLog.write("FILE-SKIP \(path) starts=\(starts)")
-                        var row = baseRow(item)
-                        row.status = "FAIL"
-                        row.note = "连续 \(starts) 次导出未完成（疑似该文件触发系统崩溃），本批已跳过"
-                        try? ManifestStore.append(url: manifestURL, rows: [row])
-                        summary.failed += 1
-                        summary.errors.append(path + " — " + row.note)
-                        progress.failedFiles += 1
-                        progress.bytesDone += item.planned.fileSize
-                        let snapshot = progress
-                        main { self.onFileDone?(row, snapshot) }
+                watchdog.touch(phase: "copy", detail: "asset#\(assetIndex) call=assetResources", assetId: assetId)
+                let resources = autoreleasepool { PhotoLibraryService.exportResources(for: asset) }
+                if resources.isEmpty {
+                    progress.skippedFiles += 1
+                    continue
+                }
+                let (directory, source) = ExportPlanner.dateDirectory(creationDate: asset.creationDate,
+                                                                      fileDate: asset.modificationDate,
+                                                                      calendar: calendar)
+                let kind = asset.mediaType == .video ? "video" : "photo"
+                var writtenOK = 0
+                var writtenFail = 0
+                var consumed = 0
+                var stopBatch = false
+                for resource in resources {
+                    // 已完成：按序消费对应清单行（名字已占用，不重导、不顶名）
+                    if var perKind = remaining[assetId], var list = perKind[kind], !list.isEmpty {
+                        list.removeFirst()
+                        perKind[kind] = list
+                        remaining[assetId] = perKind
+                        consumed += 1
+                        summary.skipped += 1
                         continue
                     }
-                    writeCursor(CrashCursor(path: path, starts: starts))
-                    let row = try autoreleasepool { try exportOne(item: item, manifestURL: manifestURL) }
-                    clearCursor() // 活着走完这个文件，解除怀疑
-                    if row.status == "OK" {
-                        doneSet.insert(path)
-                        summary.ok += 1
-                        progress.doneFiles += 1
-                    } else {
-                        summary.failed += 1
-                        summary.errors.append(path + " — " + row.note)
-                        progress.failedFiles += 1
-                    }
-                    progress.bytesDone += row.size
-                    if row.status == "OK" {
-                        ExportLog.write("FILE OK \(path) size=\(row.size)")
-                    } else {
-                        ExportLog.write("FILE \(row.status) \(path) — \(row.note)")
-                    }
-                    let snapshot = progress
-                    main { self.onFileDone?(row, snapshot) }
-                } catch {
-                    clearCursor() // exportOne 抛错但进程活着，也解除怀疑（FAIL 已记录，下轮重试）
-                    ExportLog.write("FILE ERR \(path) diskFull=\(isDiskFull(error)) — \(String(error.localizedDescription.prefix(120)))")
-                    var row = baseRow(item)
-                    row.status = "FAIL"
-                    row.note = String(error.localizedDescription.prefix(200))
-                    do { try ManifestStore.append(url: manifestURL, rows: [row]) } catch { /* 磁盘满等：仍继续 */ }
-                    summary.failed += 1
-                    summary.errors.append(path + " — " + row.note)
-                    progress.failedFiles += 1
-                    let snapshot = progress
-                    main { self.onFileDone?(row, snapshot) }
-                    if isDiskFull(error) {
-                        // 盘真的满了：继续只会刷 FAIL + 系统卡死，优雅收批
-                        summary.stoppedReason = "磁盘写满，本批到此为止（不是错误）：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
-                        ExportLog.write("DISK-FULL 停批 free=\(bytesString(freeSpaceBytes() ?? 0))")
+                    // 预算收口：已写满本批上限 → 不再开新文件
+                    if batchBytesLimit > 0 && batchBytesDone >= batchBytesLimit {
+                        summary.batchLimited = true
+                        stopBatch = true
                         break
                     }
+                    let fileName = ExportPlanner.disambiguate(fileName: resource.originalFilename,
+                                                              directory: directory, used: &used)
+                    watchdog.touch(phase: "copy", detail: "asset#\(assetIndex) call=fileSize", assetId: assetId)
+                    let size = autoreleasepool { PhotoLibraryService.fileSize(of: resource) }
+                    // 空间护栏：写不下这个文件就停批，避免刷一屏"磁盘满"FAIL
+                    if let free = freeSpaceBytes(), free < size + freeSpaceReserve {
+                        summary.stoppedReason = "剩余空间不足（剩 \(bytesString(free))，导 \(bytesString(size)) 需预留护栏）。本批到此为止：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
+                        ExportLog.write("GUARD free=\(free) need=\(size + freeSpaceReserve) → 停批")
+                        stopBatch = true
+                        break
+                    }
+                    let path = directory + "/" + fileName
+                    main { self.onFileStarted?(path) }
+                    do {
+                        // 崩溃豁免：同一文件连续 3 次都没能活着导完（上个进程死在它身上），
+                        // 记 FAIL 跳过，别让一颗坏文件把整批无限卡死。
+                        let previous = readCursor()
+                        let starts = (previous.path == path) ? previous.starts + 1 : 1
+                        if starts >= 3 {
+                            ExportLog.write("FILE-SKIP \(path) starts=\(starts)")
+                            var row = baseRow(asset: asset, relativePath: path, dateSource: source)
+                            row.status = "FAIL"
+                            row.note = "连续 \(starts) 次导出未完成（疑似该文件触发系统崩溃），本批已跳过"
+                            try? ManifestStore.append(url: manifestURL, rows: [row])
+                            summary.failed += 1
+                            summary.errors.append(path + " — " + row.note)
+                            writtenFail += 1
+                            progress.bytesDone += size
+                            continue
+                        }
+                        writeCursor(CrashCursor(path: path, starts: starts))
+                        let row = try autoreleasepool {
+                            try exportOne(asset: asset, resource: resource, relativePath: path,
+                                          dateSource: source, manifestURL: manifestURL)
+                        }
+                        clearCursor() // 活着走完这个文件，解除怀疑
+                        if row.status == "OK" {
+                            summary.ok += 1
+                            writtenOK += 1
+                        } else {
+                            summary.failed += 1
+                            summary.errors.append(path + " — " + row.note)
+                            writtenFail += 1
+                        }
+                        summary.bytesTotal += row.size
+                        progress.bytesDone += row.size
+                        batchBytesDone += row.size
+                        if row.status == "OK" {
+                            ExportLog.write("FILE OK \(path) size=\(row.size)")
+                        } else {
+                            ExportLog.write("FILE \(row.status) \(path) — \(row.note)")
+                        }
+                    } catch {
+                        clearCursor() // exportOne 抛错但进程活着，也解除怀疑（FAIL 已记录，下轮重试）
+                        ExportLog.write("FILE ERR \(path) diskFull=\(isDiskFull(error)) — \(String(error.localizedDescription.prefix(120)))")
+                        var row = baseRow(asset: asset, relativePath: path, dateSource: source)
+                        row.status = "FAIL"
+                        row.note = String(error.localizedDescription.prefix(200))
+                        do { try ManifestStore.append(url: manifestURL, rows: [row]) } catch { /* 磁盘满等：仍继续 */ }
+                        summary.failed += 1
+                        summary.errors.append(path + " — " + row.note)
+                        writtenFail += 1
+                        if isDiskFull(error) {
+                            // 盘真的满了：继续只会刷 FAIL + 系统卡死，优雅收批
+                            summary.stoppedReason = "磁盘写满，本批到此为止（不是错误）：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
+                            ExportLog.write("DISK-FULL 停批 free=\(bytesString(freeSpaceBytes() ?? 0))")
+                            stopBatch = true
+                            break
+                        }
+                    }
                 }
+                // 资产口径进度：动过的资产恰好落进一个桶；
+                // 预算/护栏在本资产第一笔之前触发的不计（本批到此为止）
+                if consumed > 0 || writtenOK > 0 || writtenFail > 0 {
+                    if consumed > 0 && writtenOK == 0 && writtenFail == 0 {
+                        progress.skippedFiles += 1
+                    } else if writtenFail > 0 {
+                        progress.failedFiles += 1
+                    } else {
+                        progress.doneFiles += 1
+                    }
+                }
+                let snapshot = progress
+                main { self.onProgress?(snapshot) }
+                if stopBatch { break }
             }
         } catch is CancellationError {
             summary.cancelled = true
@@ -211,26 +252,73 @@ final class ExportEngine {
         main { self.onFinish?(finished) }
     }
 
+    // MARK: - 规划（只摸元数据）
+
+    /// 流式规划本批要处理的资产 ID：每资产只读 localIdentifier 一个调用。
+    /// 资源解析/定名/量大小全部推迟到拷贝期按 ID 现取——规划段不再逐资产调
+    /// assetResources/fileSize（成熟导出器 #245 列定的大库热路径头号嫌疑，
+    /// 真机 32k 库曾在此挂死 3.5 分钟）。扫描全程可取消，每 500 个回调一次进度。
+    private func planAssetIds() throws -> [String] {
+        let fetch = PhotoLibraryService.fetchAllAssets()
+        let total = fetch.count
+        var ids: [String] = []
+        ids.reserveCapacity(total)
+        // 规划段崩溃豁免：处理每个资产前写「该资产第几次尝试」；
+        // 进程若死在扫描上，下轮同一资产第 3 次启动即跳过
+        var planCursor = readPlanCursor()
+        let blacklist = Set(watchdog.planBlacklist())
+        for index in 0..<total {
+            if cancelled { throw CancellationError() }
+            watchdog.touch(phase: "plan", detail: "index=\(index)/\(total) call=fetchObject")
+            let id = fetch.object(at: index).localIdentifier
+            // 黑名单：上次规划在同一资产上卡死 ≥3 分钟的，直接跳过
+            // （卡死的线程无法自救，只能靠重跑绕开）
+            if blacklist.contains(id) {
+                ExportLog.write("PLAN-BLACKLIST skip index=\(index) id=\(id)")
+                continue
+            }
+            let starts = (planCursor.index == index && planCursor.assetId == id)
+                ? planCursor.starts + 1 : 1
+            if starts >= 3 {
+                ExportLog.write("PLAN-SKIP index=\(index) id=\(id.prefix(24)) starts=\(starts)")
+                planCursor = PlanCursor()
+                clearPlanCursor()
+                continue
+            }
+            planCursor = PlanCursor(index: index, assetId: id, starts: starts)
+            writePlanCursor(planCursor)
+            ids.append(id)
+            if ids.count % 500 == 0 || ids.count == total {
+                let seen = ids.count
+                let all = total
+                ExportLog.write("PLAN \(seen)/\(all)")
+                main { self.onPlanning?(seen, all) }
+            }
+        }
+        clearPlanCursor() // 规划正常收官，豁免计数清零
+        return ids
+    }
+
     // MARK: - 单文件导出
 
-    private func exportOne(item: WorkItem, manifestURL: URL) throws -> ManifestRow {
-        let fileName = item.planned.fileName
-        let tmpDirURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("pe-export", isDirectory: true)
+    private func exportOne(asset: PHAsset, resource: PHAssetResource, relativePath: String,
+                           dateSource: DateSource, manifestURL: URL) throws -> ManifestRow {
+        let tmpURL = tmpDirURL.appendingPathComponent(UUID().uuidString + "-"
+                                                      + (relativePath as NSString).lastPathComponent)
         try FileManager.default.createDirectory(at: tmpDirURL, withIntermediateDirectories: true)
-        let tmpURL = tmpDirURL.appendingPathComponent(UUID().uuidString + "-" + fileName)
         defer { try? FileManager.default.removeItem(at: tmpURL) }
 
         // 1) 从相册写原始字节（唯一允许的取原片 API；iCloud 原片在这里按需下载，慢属正常）
-        watchdog.touch(phase: "copy", detail: "\(item.planned.relativePath) call=writeData")
-        try PhotoLibraryService.writeOriginal(resource: item.resource, to: tmpURL)
+        watchdog.touch(phase: "copy", detail: "\(relativePath) call=writeData", assetId: asset.localIdentifier)
+        try PhotoLibraryService.writeOriginal(resource: resource, to: tmpURL)
 
         // 2) 写出后哈希（"复制前"）
-        watchdog.touch(phase: "copy", detail: "\(item.planned.relativePath) call=hash")
+        watchdog.touch(phase: "copy", detail: "\(relativePath) call=hash", assetId: asset.localIdentifier)
         let writtenHash = try FileHasher.sha256(of: tmpURL)
 
         // 3) 移入正式目录（同路径旧文件是上次中断的半成品，直接替换）
-        let destURL = documentsURL.appendingPathComponent(item.planned.relativePath)
+        watchdog.touch(phase: "copy", detail: "\(relativePath) call=move", assetId: asset.localIdentifier)
+        let destURL = documentsURL.appendingPathComponent(relativePath)
         try FileManager.default.createDirectory(at: destURL.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: destURL.path) {
@@ -239,11 +327,11 @@ final class ExportEngine {
         try FileManager.default.moveItem(at: tmpURL, to: destURL)
 
         // 4) 移动后哈希（"复制后"），一致才算成功
-        watchdog.touch(phase: "copy", detail: "\(item.planned.relativePath) call=verify-hash")
+        watchdog.touch(phase: "copy", detail: "\(relativePath) call=verify-hash", assetId: asset.localIdentifier)
         let finalHash = try FileHasher.sha256(of: destURL)
-        var row = baseRow(item)
+        var row = baseRow(asset: asset, relativePath: relativePath, dateSource: dateSource)
         let attrs = try? FileManager.default.attributesOfItem(atPath: destURL.path)
-        row.size = (attrs?[.size] as? Int64) ?? item.planned.fileSize
+        row.size = (attrs?[.size] as? Int64) ?? 0
         if writtenHash == finalHash {
             row.status = "OK"
             row.sha256 = finalHash
@@ -256,102 +344,15 @@ final class ExportEngine {
         return row
     }
 
-    private func baseRow(_ item: WorkItem) -> ManifestRow {
+    private func baseRow(asset: PHAsset, relativePath: String, dateSource: DateSource) -> ManifestRow {
         var row = ManifestRow()
-        row.relativePath = item.planned.relativePath
-        row.dateSource = item.planned.dateSource.rawValue
-        row.assetId = item.asset.localIdentifier
-        row.mediaType = item.asset.mediaType == .video ? "video" : "photo"
-        row.favorite = item.asset.isFavorite
+        row.relativePath = relativePath
+        row.dateSource = dateSource.rawValue
+        row.assetId = asset.localIdentifier
+        row.mediaType = asset.mediaType == .video ? "video" : "photo"
+        row.favorite = asset.isFavorite
         row.exportedAt = ManifestStore.now()
         return row
-    }
-
-    // MARK: - 规划
-
-    /// 流式规划本批工作项：按拍摄时间正序扫资产，扫到本批字节上限即停。
-    /// 已完成的资源按 assetId+类型 从清单按序消费（名字已占用，不重导、不顶名）。
-    /// 返回是否因预算截断。规划全程可取消、每 200 个回调一次进度。
-    private func planBatch(into items: inout [WorkItem],
-                           doneByAsset: [String: [String: [String]]],
-                           used: inout Set<String>) throws -> Bool {
-        let fetch = PhotoLibraryService.fetchAllAssets()
-        let total = fetch.count
-        var scanned = 0
-        var batchBytes: Int64 = 0
-        // 每资产的可变剩余完成表
-        var remaining = doneByAsset
-        // 规划段崩溃豁免：处理每个资产前写「该资产第几次尝试」；
-        // 进程若死在某个资产上，下轮同一资产第 3 次启动即跳过（坏资产不卡死最后一批）
-        var planCursor = readPlanCursor()
-        let blacklist = Set(watchdog.planBlacklist())
-        for index in 0..<total {
-            if cancelled { throw CancellationError() }
-            watchdog.touch(phase: "plan", detail: "index=\(index)/\(total) call=fetchObject")
-            let asset = fetch.object(at: index)
-            scanned += 1
-            if scanned % 200 == 0 || scanned == total {
-                let seen = scanned
-                let all = total
-                let plannedBytes = batchBytes
-                ExportLog.write("PLAN \(seen)/\(all) batchBytes=\(plannedBytes)")
-                main { self.onPlanning?(seen, all) }
-            }
-            // 黑名单：上次规划在同一资产上卡死 ≥3 分钟的，直接跳过
-            // （卡死的线程无法自救，只能靠重跑绕开）
-            if blacklist.contains(asset.localIdentifier) {
-                ExportLog.write("PLAN-BLACKLIST skip index=\(index) id=\(asset.localIdentifier)")
-                continue
-            }
-            let starts = (planCursor.index == index && planCursor.assetId == asset.localIdentifier)
-                ? planCursor.starts + 1 : 1
-            if starts >= 3 {
-                ExportLog.write("PLAN-SKIP index=\(index) id=\(asset.localIdentifier.prefix(24)) starts=\(starts)")
-                planCursor = PlanCursor()
-                clearPlanCursor()
-                continue
-            }
-            planCursor = PlanCursor(index: index, assetId: asset.localIdentifier, starts: starts)
-            writePlanCursor(planCursor)
-            // autoreleasepool：PhotoKit 的临时对象随批释放，不在 GCD 线程上堆积
-            // （开源批量导出项目的通行做法）
-            watchdog.touch(phase: "plan", detail: "index=\(index) call=assetResources", assetId: asset.localIdentifier)
-            let resources = autoreleasepool { PhotoLibraryService.exportResources(for: asset) }
-            guard !resources.isEmpty else { continue }
-            let (directory, source) = ExportPlanner.dateDirectory(creationDate: asset.creationDate,
-                                                                  fileDate: asset.modificationDate,
-                                                                  calendar: calendar)
-            for resource in resources {
-                // 与清单行一致：mediaType 按 asset.mediaType 记（Live Photo 的 pairedVideo 行也是 "photo"），
-                // 同一资产内按资源顺序消费，正好对应清单追加顺序
-                let kind = asset.mediaType == .video ? "video" : "photo"
-                // 已完成：按序消费对应清单行，跳过（其名字已在 used，不会被人顶掉）
-                if var perKind = remaining[asset.localIdentifier],
-                   var list = perKind[kind], !list.isEmpty {
-                    list.removeFirst()
-                    perKind[kind] = list
-                    remaining[asset.localIdentifier] = perKind
-                    continue
-                }
-                let fileName = ExportPlanner.disambiguate(fileName: resource.originalFilename,
-                                                          directory: directory, used: &used)
-                watchdog.touch(phase: "plan", detail: "index=\(index) call=fileSize", assetId: asset.localIdentifier)
-                let size = autoreleasepool { PhotoLibraryService.fileSize(of: resource) }
-                items.append(WorkItem(asset: asset, resource: resource,
-                                      planned: PlannedFile(relativePath: directory + "/" + fileName,
-                                                           fileName: fileName,
-                                                           directory: directory,
-                                                           dateSource: source,
-                                                           fileSize: size)))
-                batchBytes += size
-            }
-            if batchBytesLimit > 0 && batchBytes >= batchBytesLimit {
-                clearPlanCursor() // 规划正常收官，豁免计数清零（拷贝阶段的死亡不该算到资产头上）
-                return true
-            }
-        }
-        clearPlanCursor()
-        return false
     }
 
     /// 可用空间：取「严格口径」与「重要用途口径」的较小值。
@@ -420,7 +421,6 @@ final class ExportEngine {
     // MARK: - 规划段崩溃游标
 
     /// 与拷贝段游标同理，但按「资产下标 + localIdentifier」记。
-    /// 只有扫到全库尾部（预算装得下剩余全库）才会经历完整扫描，坏资产只会在那里撞上。
     private struct PlanCursor {
         var index = -1
         var assetId = ""
@@ -448,7 +448,7 @@ final class ExportEngine {
         try? FileManager.default.removeItem(at: planCursorURL)
     }
 
-    /// 清掉上次崩溃遗留的半成品 tmp（导出中的 UUID-文件名），两类游标保留。
+    /// 清掉上次崩溃遗留的半成品 tmp（导出中的 UUID-文件名），游标与黑名单保留。
     private func sweepTmpLeftovers() {
         let contents = (try? FileManager.default.contentsOfDirectory(at: tmpDirURL,
                                                                      includingPropertiesForKeys: nil)) ?? []

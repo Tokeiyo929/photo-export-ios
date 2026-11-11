@@ -156,9 +156,9 @@ struct HomeView: View {
                 }
             } else {
                 ProgressView(value: progressFraction)
-                Text("完成 \(state.progress.doneFiles + state.progress.skippedFiles) · 失败 \(state.progress.failedFiles) · 跳过 \(state.progress.skippedFiles) / 共 \(state.progress.totalFiles)")
+                Text("完成 \(state.progress.doneFiles) · 失败 \(state.progress.failedFiles) · 跳过 \(state.progress.skippedFiles) / 共 \(state.progress.totalFiles) 项")
                     .font(.subheadline)
-                Text("已传 \(bytesString(state.progress.bytesDone)) / \(bytesString(state.progress.bytesTotal))")
+                Text(bytesText)
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }
@@ -191,6 +191,14 @@ struct HomeView: View {
     private var progressFraction: Double? {
         guard state.progress.bytesTotal > 0 else { return nil }
         return Double(state.progress.bytesDone) / Double(state.progress.bytesTotal)
+    }
+
+    /// 总字节数在拷贝期才量得出（0 = 未知），未知时只显示已传
+    private var bytesText: String {
+        if state.progress.bytesTotal > 0 {
+            return "已传 \(bytesString(state.progress.bytesDone)) / \(bytesString(state.progress.bytesTotal))"
+        }
+        return "已传 \(bytesString(state.progress.bytesDone))"
     }
 
     private func finishedCard(_ summary: ExportSummary) -> some View {
