@@ -47,10 +47,10 @@ final class WifiServer {
         // PC 端 python zeroconf 一行就接上）——电脑免手打 IP
         let deviceName = UIDevice.current.name
         let build = (Bundle.main.object(forInfoDictionaryKey: "PEBuild") as? String) ?? "?"
-        listener.service = NWService(name: deviceName,
-                                     type: "_photoexport._tcp.",
-                                     txtRecord: ["app": "photo-export", "build": build],
-                                     port: NWEndpoint.Port(rawValue: port) ?? 8765)
+        listener.service = NWListener.Service(name: deviceName,
+                                              type: "_photoexport._tcp.",
+                                              txtRecord: ["app": "photo-export", "build": build],
+                                              port: NWEndpoint.Port(rawValue: port) ?? 8765)
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
