@@ -202,16 +202,16 @@ final class WifiServer {
 
     private func listDocuments() -> [[String: Any]] {
         let fm = FileManager.default
-        let keys: [URLResourceKey] = [.isRegularFileKey, .sizeKey]
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
         guard let enumerator = fm.enumerator(at: documentsURL, includingPropertiesForKeys: keys) else {
             return []
         }
         var files: [[String: Any]] = []
         for case let url as URL in enumerator {
-            guard let values = try? url.resourceValues(forKeys: keys),
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
                   values.isRegularFile == true else { continue }
             let relative = url.path.replacingOccurrences(of: documentsURL.path + "/", with: "")
-            files.append(["path": relative, "size": values.size ?? 0])
+            files.append(["path": relative, "size": values.fileSize ?? 0])
         }
         return files
     }
