@@ -109,15 +109,18 @@ python pc/pull.py --dest D:\相册导出 --zip
 
 ### 方式 D：WiFi 直传（数据线 AFC 失效时的主路）
 
-手机 App 首页开「WiFi 传图」→ 屏幕列出本机局域网地址（多网卡全列，家庭 WiFi/个人热点都覆盖）→ 电脑同一 WiFi 下：
+手机 App 首页开「WiFi 传图」→ 电脑同一 WiFi 下（模式参考 LocalSend/GCDWebServer 等成熟工具）：
 
 ```sh
-python pc/pull.py --wifi http://192.168.1.5:8765 --dest D:\相册导出
+python pc/pull.py --wifi --dest D:\相册导出                 # 自动发现（Bonjour 广播，推荐）
+python pc/pull.py --wifi http://192.168.1.5:8765 --dest D:\相册导出   # 手填 App 显示的地址
 ```
 
+- 自动发现没搜到（部分路由器隔离组播）就退回手打地址；依赖 `pip install zeroconf`（requirements.txt 已含）
 - 拉取+逐文件 SHA-256 校验+报告，与方式 A 完全同一条流水线（清单哈希就是防篡改证明，HTTP 明文也不怕）
+- **大文件断点续传**（HTTP Range/206）：中断重跑，.part 从断点接着拉，500MB MOV 不用从头来；已验证文件自动跳过
 - 台式机没无线网卡：手机开**个人热点 + 数据线连电脑**（USB 走的就是网卡），用 App 列表里的 `172.20.10.x` 地址
-- 断了重跑同一条命令即续跑（已验证文件跳过）；App 端 1MB 分块流式发送，大 MOV 不吃内存
+- App 端 1MB 分块流式发送（大 MOV 不吃内存），传输期间申请后台时间，切后台/锁屏不容易被掐
 - 安全边界：无鉴权，仅限家庭/个人热点 WiFi 用，别在公共 WiFi 开
 
 ## 本地开发

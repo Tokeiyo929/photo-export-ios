@@ -316,7 +316,7 @@ struct HomeView: View {
                             .font(.footnote.monospaced())
                             .textSelection(.enabled)
                     }
-                    Text("手机与电脑要在同一网络（电脑网线接同一路由器也行），然后二选一：\n① 命令行运行 pull.py --wifi 上面地址 --dest 目标目录（自动按清单拉取并校验哈希）\n② 浏览器打开上面地址手动下载（/list 看全部文件）\n台式机没无线网卡：手机开「个人热点」+ 数据线连电脑（装了 iTunes 自带 USB 网卡驱动），从上往下试上面列出的地址。")
+                    Text("手机与电脑要在同一网络（电脑网线接同一路由器也行），然后三选一：\n① 命令行运行 pull.py --wifi --dest 目标目录（自动发现本机，推荐）\n② 命令行运行 pull.py --wifi 上面地址 --dest 目标目录（手动指定，自动按清单拉取并校验哈希）\n③ 浏览器打开上面地址手动下载（/list 看全部文件）\n台式机没无线网卡：手机开「个人热点」+ 数据线连电脑（装了 iTunes 自带 USB 网卡驱动），从上往下试上面列出的地址。")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }

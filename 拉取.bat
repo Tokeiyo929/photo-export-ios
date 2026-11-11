@@ -22,8 +22,7 @@ python pc\pull.py --dest "%DEST%" %*
 goto done
 
 :wifi
-set /p WURL=输入 App 显示的地址（如 http://192.168.1.5:8765）:
-if "%WURL%"=="" echo 没给地址，退出 & goto done
+set /p WURL=输入 App 显示的地址（直接回车=自动搜索同一网络里的手机）:
 python pc\pull.py --wifi "%WURL%" --dest "%DEST%" %*
 
 :done

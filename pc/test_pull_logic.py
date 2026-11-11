@@ -179,6 +179,7 @@ class StoreZipTest(unittest.TestCase):
 class _WifiFixtureHandler(http.server.BaseHTTPRequestHandler):
     """最小 WiFi 服务回路：/manifest.csv、/file/<rel>，从 fixture 目录读。"""
     root: Path = Path(".")
+    counters = {"range": 0}  # 类级 dict：收到的 Range 请求次数（续传用例断言用）
 
     def do_GET(self):
         if self.path == "/manifest.csv":
@@ -186,14 +187,25 @@ class _WifiFixtureHandler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/file/"):
             rel = urllib.parse.unquote(self.path[len("/file/"):])
             try:
-                self._send((self.root / rel).read_bytes())
+                data = (self.root / rel).read_bytes()
             except OSError:
                 self.send_error(404)
+                return
+            rng = self.headers.get("Range") or ""
+            if rng.startswith("bytes="):
+                type(self).counters["range"] += 1
+                start = int(rng[6:].split("-")[0])
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+                self._send(data[start:], send_response_line=False)
+            else:
+                self._send(data)
         else:
             self.send_error(404)
 
-    def _send(self, data: bytes):
-        self.send_response(200)
+    def _send(self, data: bytes, send_response_line: bool = True):
+        if send_response_line:
+            self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -252,6 +264,28 @@ class WifiPullTest(unittest.TestCase):
         with open(reports[-1], encoding="utf-8-sig") as handle:
             statuses = [r["result"] for r in csv.DictReader(handle)]
         self.assertEqual(statuses.count("PASS"), 2)
+
+    def test_wifi_pull_resume_from_part(self):
+        # 断点续传（GCDWebServer 同款 Range/206）：遗留 .part 从断点接着拉，最终字节全等
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="pe-wifi-root3"))
+        dest = Path(tempfile.mkdtemp(prefix="pe-wifi-dest3"))
+        rel = "2024/big.MOV"
+        payload = b"RANGE-RESUME-" * 1000
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_bytes(payload)
+        rows = [self._row(rel, payload)]
+        (root / "manifest.csv").write_bytes(b"\xef\xbb\xbf" + HEADER.encode("utf-8") + b"\n"
+                                            + "".join(r + "\n" for r in rows).encode("utf-8"))
+        part = dest / (rel + ".part")
+        part.parent.mkdir(parents=True)
+        part.write_bytes(payload[:5000])  # 上次断在这里
+        _WifiFixtureHandler.counters["range"] = 0
+        rc = self._run_wifi(root, dest)
+        self.assertEqual(rc, 0)
+        self.assertEqual((dest / rel).read_bytes(), payload)
+        self.assertGreaterEqual(_WifiFixtureHandler.counters["range"], 1, "没发 Range 请求")
+        self.assertFalse(part.exists())  # 续传完成后 .part 应原子改名
 
     def test_wifi_pull_hash_mismatch_fails(self):
         import tempfile

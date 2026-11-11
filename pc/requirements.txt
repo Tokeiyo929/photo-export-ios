@@ -1,3 +1,5 @@
 # pull.py 依赖（verify.py / 测试仅标准库）
 # 经数据线（usbmuxd/AFC）访问 App 沙盒；Windows 需 iTunes 或「Apple 设备」App 的驱动。
 pymobiledevice3>=11.0
+# WiFi 直传自动发现（--wifi 不带地址时 Bonjour 搜索手机 App）
+zeroconf

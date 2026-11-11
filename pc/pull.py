@@ -52,8 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="数据线拉取 App 导出的原片并校验哈希")
     parser.add_argument("--list", action="store_true", help="列出已连接设备")
     parser.add_argument("--udid", help="设备 serial（多台时用 --list 查看）")
-    parser.add_argument("--wifi", metavar="URL",
-                        help="WiFi 直传：App 首页「WiFi 传图」显示的地址（如 http://192.168.1.5:8765）。"
+    parser.add_argument("--wifi", nargs="?", const="discover", metavar="URL",
+                        help="WiFi 直传：不带值=Bonjour 自动搜索同一网络里的手机 App（推荐）；"
+                             "也可手填 App 首页显示的地址（如 http://192.168.1.5:8765）。"
                              "台式机没网卡时：手机开个人热点+数据线连电脑，用 App 列出的 172.20.10.x 地址")
     parser.add_argument("--app", default=DEFAULT_BUNDLE, help=f"App bundle id（默认 {DEFAULT_BUNDLE}）")
     parser.add_argument("--dest", help="拉取目标目录")
@@ -107,18 +108,98 @@ def _http_get(url: str, timeout: int = 30) -> bytes:
     raise last_error
 
 
-def _http_download(url: str, target: Path, timeout: int = 60) -> None:
-    """流式下载到 <target>.part 再原子改名：中断不产生半截假文件，重跑自动重来。"""
+def _http_download(url: str, target: Path, timeout: int = 60) -> bool:
+    """流式下载到 <target>.part 再原子改名：中断不产生半截假文件。
+    有遗留 .part 就带 Range 头续传（成熟文件服务器 GCDWebServer 同款）；
+    服务器回 200 不认 Range 就整个重下。返回是否发生了续传。"""
     import shutil
+    import urllib.error
     import urllib.request
     part = target.with_name(target.name + ".part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, open(part, "wb") as handle:
-        shutil.copyfileobj(response, handle)
+    resumed = False
+    for attempt in range(2):
+        headers: dict[str, str] = {}
+        resumed = attempt == 0 and part.exists() and part.stat().st_size > 0
+        if resumed:
+            headers["Range"] = f"bytes={part.stat().st_size}-"
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = getattr(response, "status", 200)
+                if status == 206 and resumed:
+                    with open(part, "ab") as handle:  # 从断点接着写
+                        shutil.copyfileobj(response, handle, length=1024 * 1024)
+                else:
+                    resumed = False
+                    with open(part, "wb") as handle:  # 服务器不支持 Range，从头来
+                        shutil.copyfileobj(response, handle, length=1024 * 1024)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code == 416 and attempt == 0 and part.exists():
+                part.unlink()  # 断点越界（服务器端文件变了）→ 清掉重来
+                continue
+            raise
     part.replace(target)
+    return resumed
+
+
+def _wifi_discover(timeout_seconds: float = 10.0) -> str:
+    """Bonjour 自动发现 App 的 WiFi 服务（_photoexport._tcp.），返回 base URL。
+    成熟工具（LocalSend/GCDWebServer）同款思路：手机广播，电脑浏览，免手打 IP。
+    找到一台→直接用；多台/零台→打日志提示手打地址。"""
+    import socket
+    import time
+    try:
+        from zeroconf import ServiceBrowser, Zeroconf
+    except ImportError:
+        pe_common.log("自动发现缺依赖：pip install zeroconf（或手打 --wifi http://IP:8765）")
+        return ""
+    found: dict[str, str] = {}
+
+    class _Listener:
+        def add_service(self, zc, type_, name):
+            info = zc.get_service_info(type_, name, timeout=3000)
+            if info and info.addresses:
+                ip = socket.inet_ntoa(info.addresses[0])
+                found[name] = f"http://{ip}:{info.port}"
+
+        def update_service(self, *args):
+            pass
+
+        def remove_service(self, *args):
+            pass
+
+    pe_common.log(f"正在自动搜索同一网络里的手机 App（Bonjour _photoexport._tcp.，最多 {int(timeout_seconds)} 秒）…")
+    zc = Zeroconf()
+    try:
+        ServiceBrowser(zc, "_photoexport._tcp.", _Listener())
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline and not found:
+            time.sleep(0.3)
+        time.sleep(1.0)  # 再攒一秒，多台手机时能凑齐
+    finally:
+        zc.close()
+    if not found:
+        pe_common.log("没搜到。检查：①App 首页已点「开启 WiFi 传图」②手机和电脑同一网络"
+                      "（部分路由器隔离组播，那就手打 --wifi http://IP:8765）")
+        return ""
+    if len(found) > 1:
+        pe_common.log("搜到多台，请手打对应地址：")
+        for name, url in sorted(found.items()):
+            pe_common.log(f"  {name} -> {url}")
+        return ""
+    url = next(iter(found.values()))
+    pe_common.log(f"已发现手机：{url}")
+    return url
 
 
 def wifi_pull(args: argparse.Namespace) -> int:
-    base = args.wifi.rstrip("/")
+    base = (args.wifi or "").strip()
+    if not base or base.lower() in ("discover", "auto"):
+        base = _wifi_discover()
+        if not base:
+            return 2
+    base = base.rstrip("/")
     dest = Path(args.dest)
     dest.mkdir(parents=True, exist_ok=True)
     pe_common.log(f"WiFi 直传：{base}")
@@ -177,7 +258,7 @@ def wifi_pull(args: argparse.Namespace) -> int:
         url = base + "/file/" + urllib.parse.quote(rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            _http_download(url, target)
+            resumed = _http_download(url, target)
         except Exception as error:
             summary.failed += 1
             report.append(pe_common._report_row(rel, row.sha256, "", 0, "ERROR", f"WiFi 拉取失败：{error}"))
@@ -193,8 +274,10 @@ def wifi_pull(args: argparse.Namespace) -> int:
         else:
             summary.passed += 1
             summary.total_bytes += actual_size
-            report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "PASS", ""))
-            pe_common.log(f"{prefix} PASS  {rel}  ({pe_common.bytes_str(actual_size)})")
+            report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "PASS",
+                                                "断点续传" if resumed else ""))
+            pe_common.log(f"{prefix} PASS  {rel}  ({pe_common.bytes_str(actual_size)})"
+                          + ("  [续传]" if resumed else ""))
 
     # 4) 报告与总结
     report_path = pe_common.default_report_path(dest)
@@ -410,7 +493,7 @@ def main() -> int:
     if not args.dest:
         pe_common.log("需要 --dest 目标目录（或用 --list 先看设备）。")
         return 2
-    if args.wifi:
+    if args.wifi is not None:  # 空串也算 WiFi 模式（拉取.bat 回车=自动发现）
         return wifi_pull(args)
     try:
         return asyncio.run(amain(args))
