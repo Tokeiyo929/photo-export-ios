@@ -49,8 +49,7 @@ final class WifiServer {
         let build = (Bundle.main.object(forInfoDictionaryKey: "PEBuild") as? String) ?? "?"
         listener.service = NWListener.Service(name: deviceName,
                                               type: "_photoexport._tcp.",
-                                              txtRecord: ["app": "photo-export", "build": build],
-                                              port: NWEndpoint.Port(rawValue: port) ?? 8765)
+                                              txtRecord: ["app": "photo-export", "build": build])
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
