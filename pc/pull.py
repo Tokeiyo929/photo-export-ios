@@ -352,7 +352,7 @@ async def amain(args: argparse.Namespace) -> int:
     if installed is not None and bundle != args.app:
         write_cache(bundle)
 
-    pe_common.log(f"打开 App 沙盒（house_arrest/VendDocuments）：{bundle}")
+    pe_common.log(f"打开 App 沙盒（house_arrest）：{bundle}")
     # create 工厂 = 构造 + await send_command(VendDocuments)，出错自动关闭
     try:
         house = await HouseArrestService.create(lockdown, bundle, documents_only=True)
@@ -363,25 +363,48 @@ async def amain(args: argparse.Namespace) -> int:
             pe_common.log(f"用 {bundle} 打不开沙盒，已清缓存（重跑本命令会重新枚举）。")
         raise
 
+    # iOS 27 实锤：对重签名 App，house_arrest 可能服务错误的容器视图（按名读全 OBJECT_NOT_FOUND，
+    # App 自己却读写正常）。house_arrest 协议客户端只有 VendDocuments/VendContainer 两个旋钮
+    # （读 pymobiledevice3 源码实锤，没有「指定容器」参数），成熟工具（ifuse --documents/iMazing）
+    # 也都只有这条路——所以两种 vend 都试：VendDocuments 读不到已知文件（App 跑过导出后 manifest
+    # 必然存在）就退 VendContainer 整容器再试一次，路径统一加 Documents/ 前缀。
+    offset = ""  # AFC 根偏移：VendDocuments 根就是 Documents；VendContainer 根是容器
+    try:
+        manifest_bytes = await house.get_file_contents(pe_common.MANIFEST_NAME)
+    except Exception as error:
+        pe_common.log(f"VendDocuments 视图读不到 manifest.csv：{error}")
+        pe_common.log("退回 VendContainer（整容器）再试——iOS 27 两种 vend 命令的容器映射可能不同。")
+        try:
+            await house.close()
+        except Exception:
+            pass
+        house = await HouseArrestService.create(lockdown, bundle, documents_only=False)
+        offset = "Documents"
+        try:
+            manifest_bytes = await house.get_file_contents(f"{offset}/{pe_common.MANIFEST_NAME}")
+        except Exception as error2:
+            pe_common.log(f"VendContainer 也读不到 manifest.csv：{error2}")
+            pe_common.log("请确认 App 已在手机上跑过一次导出，bundle id 是否正确（--app）。")
+            pe_common.log("两种 vend 都读不到 = 数据线通道在这台机上废了，走 WiFi："
+                          "App 首页开「WiFi 传图」，电脑 python pc/pull.py --wifi --dest <目录>（自动发现）")
+            return 2
+        pe_common.log("VendContainer 可用——数据线走整容器模式（路径带 Documents/ 前缀）。")
+
+    def rooted(rel: str) -> str:
+        """App Documents 下的相对路径 → AFC 会话里的实际路径。"""
+        return f"{offset}/{rel}" if offset else rel
+
     # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里。
-    # 必须在 manifest 之前：首次导出/沙盒重置后 manifest 可能还不存在，但日志一定在。
+    # 必须在 manifest 之后处理 vend 兜底，但日志读取仍尽量早：首跑无清单也拿得到日志。
     diagnostics = {"export-log.txt", "export-log.old.txt"}
     for diag in sorted(diagnostics):
         try:
-            data = await house.get_file_contents(diag)
+            data = await house.get_file_contents(rooted(diag))
         except Exception:
             continue
         target = dest / f"device-{diag}"
         target.write_bytes(data)
         pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
-
-    # 1) 读清单
-    try:
-        manifest_bytes = await house.get_file_contents(pe_common.MANIFEST_NAME)
-    except Exception as error:
-        pe_common.log(f"读取 manifest.csv 失败：{error}")
-        pe_common.log("请确认 App 已在手机上跑过一次导出，bundle id 是否正确（--app）。")
-        return 2
     rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
     expected = pe_common.pullable_rows(rows)
     pulled_note = ""
@@ -404,10 +427,14 @@ async def amain(args: argparse.Namespace) -> int:
                 await walk_dir(path)
             else:
                 stat = await house.stat(path)
-                device_files[path.lstrip("/")] = stat.get("st_size", 0)
+                # 存储键统一回 Documents 相对口径（VendContainer 时剥掉 Documents/ 前缀）
+                key = path.lstrip("/")
+                if offset and key.startswith(offset + "/"):
+                    key = key[len(offset) + 1:]
+                device_files[key] = stat.get("st_size", 0)
 
     try:
-        await walk_dir("")
+        await walk_dir(offset)
     except Exception as error:
         pe_common.log(f"设备端文件枚举失败（跳过孤儿检测）：{error}")
     known = {r.relative_path for r in expected}
@@ -441,10 +468,10 @@ async def amain(args: argparse.Namespace) -> int:
                                                     "SKIP-VERIFIED", "已存在且哈希一致"))
                 pe_common.log(f"{prefix} SKIP  {rel}")
                 continue
-        # 拉取（App 端按日期归档的相对路径）
+        # 拉取（App 端按日期归档的相对路径；pull 保留 basename，落位不变）
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            await house.pull(rel, str(target.parent))
+            await house.pull(rooted(rel), str(target.parent))
         except Exception as error:
             summary.failed += 1
             report.append(pe_common._report_row(rel, row.sha256, "", 0, "ERROR", f"拉取失败：{error}"))
