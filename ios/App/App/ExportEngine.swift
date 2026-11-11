@@ -85,6 +85,7 @@ final class ExportEngine {
         var summary = ExportSummary()
         let manifestURL = documentsURL.appendingPathComponent("manifest.csv")
         do {
+            sweepTmpLeftovers() // 上次崩溃可能遗留半成品 tmp，清掉（保留崩溃游标）
             let (rows, _) = ManifestStore.load(url: manifestURL)
             let dict = ManifestStore.rowDictionary(of: rows)
             var doneSet = Set<String>()
@@ -107,7 +108,8 @@ final class ExportEngine {
             progress.bytesTotal = items.reduce(0) { $0 + $1.planned.fileSize }
             summary.totalFiles = items.count
             summary.bytesTotal = progress.bytesTotal
-            main { self.onStart?(items.count, self.progress.bytesTotal) }
+            let totalBytes = progress.bytesTotal
+            main { self.onStart?(items.count, totalBytes) }
 
             for item in items {
                 if cancelled {
@@ -128,7 +130,26 @@ final class ExportEngine {
                 }
                 main { self.onFileStarted?(path) }
                 do {
+                    // 崩溃豁免：同一文件连续 3 次都没能活着导完（上个进程死在它身上），
+                    // 记 FAIL 跳过，别让一颗坏文件把整批无限卡死。
+                    let previous = readCursor()
+                    let starts = (previous.path == path) ? previous.starts + 1 : 1
+                    if starts >= 3 {
+                        var row = baseRow(item)
+                        row.status = "FAIL"
+                        row.note = "连续 \(starts) 次导出未完成（疑似该文件触发系统崩溃），本批已跳过"
+                        try? ManifestStore.append(url: manifestURL, rows: [row])
+                        summary.failed += 1
+                        summary.errors.append(path + " — " + row.note)
+                        progress.failedFiles += 1
+                        progress.bytesDone += item.planned.fileSize
+                        let snapshot = progress
+                        main { self.onFileDone?(row, snapshot) }
+                        continue
+                    }
+                    writeCursor(CrashCursor(path: path, starts: starts))
                     let row = try exportOne(item: item, manifestURL: manifestURL)
+                    clearCursor() // 活着走完这个文件，解除怀疑
                     if row.status == "OK" {
                         doneSet.insert(path)
                         summary.ok += 1
@@ -139,16 +160,24 @@ final class ExportEngine {
                         progress.failedFiles += 1
                     }
                     progress.bytesDone += row.size
-                    main { self.onFileDone?(row, self.progress) }
+                    let snapshot = progress
+                    main { self.onFileDone?(row, snapshot) }
                 } catch {
+                    clearCursor() // exportOne 抛错但进程活着，也解除怀疑（FAIL 已记录，下轮重试）
                     var row = baseRow(item)
                     row.status = "FAIL"
                     row.note = String(error.localizedDescription.prefix(200))
-                    do { try ManifestStore.append(url: manifestURL, rows: [row]) } catch { /* 磁盘满等：仍继续下一文件 */ }
+                    do { try ManifestStore.append(url: manifestURL, rows: [row]) } catch { /* 磁盘满等：仍继续 */ }
                     summary.failed += 1
                     summary.errors.append(path + " — " + row.note)
                     progress.failedFiles += 1
-                    main { self.onFileDone?(row, self.progress) }
+                    let snapshot = progress
+                    main { self.onFileDone?(row, snapshot) }
+                    if isDiskFull(error) {
+                        // 盘真的满了：继续只会刷 FAIL + 系统卡死，优雅收批
+                        summary.stoppedReason = "磁盘写满，本批到此为止（不是错误）：先把已导出文件拉到电脑并校验 PASS，再回 App 点「清理已拉取文件」释放空间后继续。"
+                        break
+                    }
                 }
             }
         } catch is CancellationError {
@@ -156,7 +185,9 @@ final class ExportEngine {
         } catch {
             summary.errors.append("规划失败 — " + error.localizedDescription)
         }
-        main { self.onFinish?(summary) }
+        clearCursor() // 本次是正常收尾（含取消/护栏/写满），崩溃怀疑清零
+        let finished = summary
+        main { self.onFinish?(finished) }
     }
 
     // MARK: - 单文件导出
@@ -231,7 +262,9 @@ final class ExportEngine {
             let asset = fetch.object(at: index)
             scanned += 1
             if scanned % 200 == 0 || scanned == total {
-                main { self.onPlanning?(scanned, total) }
+                let seen = scanned
+                let all = total
+                main { self.onPlanning?(seen, all) }
             }
             let resources = PhotoLibraryService.exportResources(for: asset)
             guard !resources.isEmpty else { continue }
@@ -268,10 +301,76 @@ final class ExportEngine {
         return false
     }
 
-    /// 可用空间（按重要用途口径），取不到返回 nil（护栏跳过）。
+    /// 可用空间：取「严格口径」与「重要用途口径」的较小值。
+    /// 重要用途口径会把可清除缓存也算进可用，虚高——手机只剩几个 G 时按它放行，
+    /// 真写到盘满系统会卡死然后杀掉 App（真机实测）；两个口径取小才诚实。取不到返回 nil（护栏跳过）。
     private func freeSpaceBytes() -> Int64? {
-        try? documentsURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage
+        guard let values = try? documentsURL.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey,
+        ]) else { return nil }
+        let strict = values.volumeAvailableCapacity
+        let important = values.volumeAvailableCapacityForImportantUsage
+        switch (strict, important) {
+        case let (s?, i?): return min(s, i)
+        case let (s?, nil): return s
+        case let (nil, i?): return i
+        default: return nil
+        }
+    }
+
+    /// 是否磁盘写满（ENOSPC）：Cocoa 640 / POSIX 28，含底层错误链。
+    private func isDiskFull(_ error: Error) -> Bool {
+        func full(_ ns: NSError) -> Bool {
+            (ns.domain == NSCocoaErrorDomain && ns.code == NSFileWriteOutOfSpaceError)
+                || (ns.domain == NSPOSIXErrorDomain && ns.code == 28)
+        }
+        let ns = error as NSError
+        let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        return full(ns) || (underlying.map(full) ?? false)
+    }
+
+    // MARK: - 崩溃游标
+
+    /// 记录"正在导哪个文件、第几次尝试"。进程若死在某个文件上，游标留在盘上；
+    /// 下次运行同一文件第三次启动即豁免跳过。正常走完一个文件就清游标。
+    private struct CrashCursor {
+        var path = ""
+        var starts = 0
+    }
+
+    private var tmpDirURL: URL {
+        URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("pe-export", isDirectory: true)
+    }
+
+    private var cursorURL: URL {
+        tmpDirURL.appendingPathComponent("cursor.txt")
+    }
+
+    private func readCursor() -> CrashCursor {
+        guard let raw = try? String(contentsOf: cursorURL, encoding: .utf8) else { return CrashCursor() }
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count >= 2, let starts = Int(lines[1]) else { return CrashCursor() }
+        return CrashCursor(path: lines[0], starts: starts)
+    }
+
+    private func writeCursor(_ cursor: CrashCursor) {
+        try? FileManager.default.createDirectory(at: tmpDirURL, withIntermediateDirectories: true)
+        let text = cursor.path + "\n" + String(cursor.starts)
+        try? text.data(using: .utf8)?.write(to: cursorURL, options: .atomic)
+    }
+
+    private func clearCursor() {
+        try? FileManager.default.removeItem(at: cursorURL)
+    }
+
+    /// 清掉上次崩溃遗留的半成品 tmp（导出中的 UUID-文件名），游标保留。
+    private func sweepTmpLeftovers() {
+        let contents = (try? FileManager.default.contentsOfDirectory(at: tmpDirURL,
+                                                                     includingPropertiesForKeys: nil)) ?? []
+        for item in contents where item.lastPathComponent != "cursor.txt" {
+            try? FileManager.default.removeItem(at: item)
+        }
     }
 
     private func main(_ body: @escaping () -> Void) {
