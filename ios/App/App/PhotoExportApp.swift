@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct PhotoExportApp: App {
@@ -19,7 +20,8 @@ struct PhotoExportApp: App {
                     case .background: name = "background"
                     @unknown default: name = "unknown"
                     }
-                    ExportLog.write("LIFECYCLE \(name) exportRunning=\(state.exportRunning)")
+                    if phase == .active { state.reassertKeepAwakeIfNeeded() }
+                    ExportLog.write("LIFECYCLE \(name) exportRunning=\(state.exportRunning) idle=\(UIApplication.shared.isIdleTimerDisabled)")
                 }
         }
     }

@@ -61,6 +61,7 @@ final class AppState: ObservableObject {
     @Published var verifyResult = VerifyResult()
 
     private var exportEngine: ExportEngine?
+    private var keepAwakeTimer: Timer?
     private var autoTestScheduled = false
 
     var documentsURL: URL {
@@ -155,7 +156,7 @@ final class AppState: ObservableObject {
         planningTotal = 0
         lastFinished = nil
         verifyResult = VerifyResult()
-        UIApplication.shared.isIdleTimerDisabled = true // 屏幕常亮，保证前台稳定跑完
+        setKeepAwake(true) // 屏幕常亮，保证前台稳定跑完
         print("PE EXPORT: start batchLimit=\(batchMB == 0 ? "unlimited" : "\(batchMB)MB")")
         ExportLog.write("EXPORT start build=\(buildLabel) batchMB=\(batchMB) library=\(libraryCount) free=\(bytesString(freeBytes))")
         let engine = ExportEngine(documentsURL: documentsURL, batchBytesLimit: batchBytesLimit)
@@ -182,7 +183,7 @@ final class AppState: ObservableObject {
             guard let self else { return }
             self.exportRunning = false
             self.exportEngine = nil
-            UIApplication.shared.isIdleTimerDisabled = false
+            self.setKeepAwake(false)
             self.lastFinished = summary
             self.progress.currentFile = ""
             print("PE EXPORT: finish ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped) cancelled=\(summary.cancelled)")
@@ -197,6 +198,30 @@ final class AppState: ObservableObject {
 
     func cancelExport() {
         exportEngine?.cancel()
+    }
+
+    /// 屏幕常亮。isIdleTimerDisabled 只设一次不可靠——用户真机（iOS 27）实锤导出中
+    /// 依旧自动锁屏（低电量/系统紧绷等状态系统可能无视该标志）。导出期间由主线程
+    /// Timer 每 20s 重申一次；readback 落日志，若「设了 true 却读到 false」就是实锤。
+    private func setKeepAwake(_ on: Bool) {
+        UIApplication.shared.isIdleTimerDisabled = on
+        keepAwakeTimer?.invalidate()
+        keepAwakeTimer = nil
+        if on {
+            let timer = Timer(timeInterval: 20, repeats: true) { [weak self] _ in
+                guard let self, self.exportRunning else { return }
+                UIApplication.shared.isIdleTimerDisabled = true
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            keepAwakeTimer = timer
+        }
+        ExportLog.write("KEEP-AWAKE \(on ? "on" : "off") readback=\(UIApplication.shared.isIdleTimerDisabled)")
+    }
+
+    /// 解锁回到前台时立即补一次常亮（上面的 Timer 最多 20s 后也会补，这里即时）
+    func reassertKeepAwakeIfNeeded() {
+        guard exportRunning else { return }
+        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     // MARK: - 清理已拉取
