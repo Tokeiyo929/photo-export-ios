@@ -46,6 +46,7 @@ final class ExportEngine {
     private let freeSpaceReserve: Int64 = 1_073_741_824 // 1 GB
     private let lock = NSLock()
     private var cancelledFlag = false
+    private let watchdog: StallWatchdog
 
     var cancelled: Bool {
         lock.lock()
@@ -73,6 +74,9 @@ final class ExportEngine {
         self.documentsURL = documentsURL
         self.calendar = calendar
         self.batchBytesLimit = batchBytesLimit
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("pe-export", isDirectory: true)
+        self.watchdog = StallWatchdog(blacklistURL: tmp.appendingPathComponent("plan-blacklist.txt"))
     }
 
     private struct WorkItem {
@@ -84,6 +88,8 @@ final class ExportEngine {
     func run() {
         var summary = ExportSummary()
         let manifestURL = documentsURL.appendingPathComponent("manifest.csv")
+        _ = watchdog.start()
+        defer { watchdog.stop() } // 与 run 同寿；最多多活一个 20s 巡检周期
         do {
             sweepTmpLeftovers() // 上次崩溃可能遗留半成品 tmp，清掉（保留崩溃游标）
             let (rows, _) = ManifestStore.load(url: manifestURL)
@@ -124,6 +130,7 @@ final class ExportEngine {
                     break
                 }
                 let path = item.planned.relativePath
+                watchdog.touch(phase: "copy", detail: "file=\(path)")
                 if doneSet.contains(path) {
                     summary.skipped += 1
                     progress.skippedFiles += 1
@@ -214,10 +221,12 @@ final class ExportEngine {
         let tmpURL = tmpDirURL.appendingPathComponent(UUID().uuidString + "-" + fileName)
         defer { try? FileManager.default.removeItem(at: tmpURL) }
 
-        // 1) 从相册写原始字节（唯一允许的取原片 API）
+        // 1) 从相册写原始字节（唯一允许的取原片 API；iCloud 原片在这里按需下载，慢属正常）
+        watchdog.touch(phase: "copy", detail: "\(item.planned.relativePath) call=writeData")
         try PhotoLibraryService.writeOriginal(resource: item.resource, to: tmpURL)
 
         // 2) 写出后哈希（"复制前"）
+        watchdog.touch(phase: "copy", detail: "\(item.planned.relativePath) call=hash")
         let writtenHash = try FileHasher.sha256(of: tmpURL)
 
         // 3) 移入正式目录（同路径旧文件是上次中断的半成品，直接替换）
@@ -230,6 +239,7 @@ final class ExportEngine {
         try FileManager.default.moveItem(at: tmpURL, to: destURL)
 
         // 4) 移动后哈希（"复制后"），一致才算成功
+        watchdog.touch(phase: "copy", detail: "\(item.planned.relativePath) call=verify-hash")
         let finalHash = try FileHasher.sha256(of: destURL)
         var row = baseRow(item)
         let attrs = try? FileManager.default.attributesOfItem(atPath: destURL.path)
@@ -274,8 +284,10 @@ final class ExportEngine {
         // 规划段崩溃豁免：处理每个资产前写「该资产第几次尝试」；
         // 进程若死在某个资产上，下轮同一资产第 3 次启动即跳过（坏资产不卡死最后一批）
         var planCursor = readPlanCursor()
+        let blacklist = Set(watchdog.planBlacklist())
         for index in 0..<total {
             if cancelled { throw CancellationError() }
+            watchdog.touch(phase: "plan", detail: "index=\(index)/\(total) call=fetchObject")
             let asset = fetch.object(at: index)
             scanned += 1
             if scanned % 200 == 0 || scanned == total {
@@ -284,6 +296,12 @@ final class ExportEngine {
                 let plannedBytes = batchBytes
                 ExportLog.write("PLAN \(seen)/\(all) batchBytes=\(plannedBytes)")
                 main { self.onPlanning?(seen, all) }
+            }
+            // 黑名单：上次规划在同一资产上卡死 ≥3 分钟的，直接跳过
+            // （卡死的线程无法自救，只能靠重跑绕开）
+            if blacklist.contains(asset.localIdentifier) {
+                ExportLog.write("PLAN-BLACKLIST skip index=\(index) id=\(asset.localIdentifier)")
+                continue
             }
             let starts = (planCursor.index == index && planCursor.assetId == asset.localIdentifier)
                 ? planCursor.starts + 1 : 1
@@ -297,6 +315,7 @@ final class ExportEngine {
             writePlanCursor(planCursor)
             // autoreleasepool：PhotoKit 的临时对象随批释放，不在 GCD 线程上堆积
             // （开源批量导出项目的通行做法）
+            watchdog.touch(phase: "plan", detail: "index=\(index) call=assetResources", assetId: asset.localIdentifier)
             let resources = autoreleasepool { PhotoLibraryService.exportResources(for: asset) }
             guard !resources.isEmpty else { continue }
             let (directory, source) = ExportPlanner.dateDirectory(creationDate: asset.creationDate,
@@ -316,6 +335,7 @@ final class ExportEngine {
                 }
                 let fileName = ExportPlanner.disambiguate(fileName: resource.originalFilename,
                                                           directory: directory, used: &used)
+                watchdog.touch(phase: "plan", detail: "index=\(index) call=fileSize", assetId: asset.localIdentifier)
                 let size = autoreleasepool { PhotoLibraryService.fileSize(of: resource) }
                 items.append(WorkItem(asset: asset, resource: resource,
                                       planned: PlannedFile(relativePath: directory + "/" + fileName,
@@ -432,7 +452,7 @@ final class ExportEngine {
     private func sweepTmpLeftovers() {
         let contents = (try? FileManager.default.contentsOfDirectory(at: tmpDirURL,
                                                                      includingPropertiesForKeys: nil)) ?? []
-        let keep: Set<String> = ["cursor.txt", "plan-cursor.txt"]
+        let keep: Set<String> = ["cursor.txt", "plan-cursor.txt", "plan-blacklist.txt"]
         for item in contents where !keep.contains(item.lastPathComponent) {
             try? FileManager.default.removeItem(at: item)
         }
@@ -440,5 +460,87 @@ final class ExportEngine {
 
     private func main(_ body: @escaping () -> Void) {
         DispatchQueue.main.async(execute: body)
+    }
+}
+
+/// 心跳看门狗：真机大库的「闪退」常常不留崩溃报告（卡死后被系统静默杀掉），
+/// 日志最后一行没了下文，定位不到卡在哪个调用。引擎在每个 PhotoKit 调用前
+/// touch 一次心跳；看门狗协程每 20s 巡检，同一调用点停住 60s 起每分钟落一行
+/// STALL（阶段/调用点/卡了多久）。规划段卡死 ≥3 分钟判定为坏资产：写进
+/// plan-blacklist.txt，下次运行直接跳过——卡死的线程无法自救，只能重跑绕开。
+/// 拷贝段不拉黑：writeData 对 iCloud 原片按需下载，慢是正常的，只记日志。
+private final class StallWatchdog {
+
+    private let lock = NSLock()
+    private let blacklistURL: URL
+    private var phase = ""
+    private var detail = ""
+    private var assetId = ""
+    private var lastTouch = Date()
+    private var lastLoggedMinute = 0
+    private var stopped = false
+
+    init(blacklistURL: URL) {
+        self.blacklistURL = blacklistURL
+    }
+
+    var isStopped: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stopped
+    }
+
+    /// 阶段推进时调用；detail 不变（还停在同一调用里）则保持原时间戳
+    func touch(phase: String, detail: String, assetId: String = "") {
+        lock.lock(); defer { lock.unlock() }
+        if self.phase != phase || self.detail != detail {
+            self.phase = phase
+            self.detail = detail
+            self.assetId = assetId
+            self.lastTouch = Date()
+            self.lastLoggedMinute = 0
+        }
+    }
+
+    func stop() {
+        lock.lock(); stopped = true; lock.unlock()
+    }
+
+    func start() -> Task<Void, Never> {
+        let watchdog = self
+        return Task.detached(priority: .utility) {
+            while !watchdog.isStopped {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                if let line = watchdog.poll() { ExportLog.write(line) }
+            }
+        }
+    }
+
+    /// 停住 ≥60s 时返回日志行（每分钟一行），否则 nil。
+    /// 规划段满 3 分钟即把当前资产拉黑（一次误判的代价只是少导一张，可重跑补回）。
+    func poll() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopped, !phase.isEmpty else { return nil }
+        let age = Date().timeIntervalSince(lastTouch)
+        guard age >= 60 else { return nil }
+        let minute = Int(age / 60)
+        guard minute > lastLoggedMinute else { return nil }
+        lastLoggedMinute = minute
+        if phase == "plan", !assetId.isEmpty, minute >= 3 {
+            appendBlacklist(assetId)
+            return "STALL-FATAL phase=plan stuck=\(Int(age))s asset=\(assetId) 已入黑名单，取消后重跑将跳过该资产"
+        }
+        return "STALL phase=\(phase) stuck=\(Int(age))s at \(detail)"
+    }
+
+    private func appendBlacklist(_ assetId: String) {
+        var lines = planBlacklist()
+        guard !lines.contains(assetId) else { return }
+        lines.append(assetId)
+        try? (lines.joined(separator: "\n") + "\n").data(using: .utf8)?.write(to: blacklistURL, options: .atomic)
+    }
+
+    func planBlacklist() -> [String] {
+        guard let raw = try? String(contentsOf: blacklistURL, encoding: .utf8) else { return [] }
+        return raw.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
     }
 }

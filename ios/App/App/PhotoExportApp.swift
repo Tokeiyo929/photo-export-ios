@@ -3,11 +3,24 @@ import SwiftUI
 @main
 struct PhotoExportApp: App {
     @StateObject private var state = AppState()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(state)
+                .onChange(of: scenePhase) { phase in
+                    // 熄屏/切后台取证：锁屏时依次 inactive→background。
+                    // 与看门狗 STALL 互为印证：区分「锁屏挂起」和「App 卡死」。
+                    let name: String
+                    switch phase {
+                    case .active: name = "active"
+                    case .inactive: name = "inactive"
+                    case .background: name = "background"
+                    @unknown default: name = "unknown"
+                    }
+                    ExportLog.write("LIFECYCLE \(name) exportRunning=\(state.exportRunning)")
+                }
         }
     }
 }
