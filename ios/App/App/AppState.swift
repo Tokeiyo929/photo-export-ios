@@ -69,7 +69,7 @@ final class AppState: ObservableObject {
 
     /// CI 构建号（Info.plist PEBuild，workflow 注入）；本地开发显示 dev。
     var buildLabel: String {
-        let build = Bundle.main.object(forKey: "PEBuild") as? String ?? ""
+        let build = Bundle.main.object(forInfoDictionaryKey: "PEBuild") as? String ?? ""
         return build.isEmpty ? "dev" : "#\(build)"
     }
 

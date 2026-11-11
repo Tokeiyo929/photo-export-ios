@@ -87,8 +87,8 @@ final class ExportEngine {
         do {
             sweepTmpLeftovers() // 上次崩溃可能遗留半成品 tmp，清掉（保留崩溃游标）
             let (rows, _) = ManifestStore.load(url: manifestURL)
-            ExportLog.write("RUN start batchLimit=\(batchBytesLimit) manifestRows=\(dict.count) free=\(bytesString(freeSpaceBytes() ?? 0))")
             let dict = ManifestStore.rowDictionary(of: rows)
+            ExportLog.write("RUN start batchLimit=\(batchBytesLimit) manifestRows=\(dict.count) free=\(bytesString(freeSpaceBytes() ?? 0))")
             var doneSet = Set<String>()
             // assetId -> (photo/video -> [已完成的相对路径，按追加顺序])
             // 用于规划时按序消费，保证跨批重名消歧结果一致（不重导、不顶名）
