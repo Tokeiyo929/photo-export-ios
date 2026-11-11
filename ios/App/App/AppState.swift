@@ -40,9 +40,10 @@ final class AppState: ObservableObject {
     @Published var freeBytes: Int64 = 0
     @Published var estimating = false
 
-    /// 分批导出：每批字节数上限（GB），0 = 不限。大库必备：装不下整个相册时按批导出→拉取→清理。
-    @Published var batchGB = 2
-    var batchBytesLimit: Int64 { Int64(batchGB) * 1_073_741_824 }
+    /// 分批导出：每批字节数上限（MB），0 = 不限。大库必备：装不下整个相册时按批导出→拉取→清理。
+    /// 500 MB 档给剩余空间很小的手机（如 256G 只剩几个 G）。
+    @Published var batchMB = 2048
+    var batchBytesLimit: Int64 { Int64(batchMB) * 1_048_576 }
 
     @Published var exportRunning = false
     @Published var planningScanned = 0
@@ -144,7 +145,7 @@ final class AppState: ObservableObject {
         lastFinished = nil
         verifyResult = VerifyResult()
         UIApplication.shared.isIdleTimerDisabled = true // 屏幕常亮，保证前台稳定跑完
-        print("PE EXPORT: start batchLimit=\(batchGB == 0 ? "unlimited" : "\(batchGB)GB")")
+        print("PE EXPORT: start batchLimit=\(batchMB == 0 ? "unlimited" : "\(batchMB)MB")")
         let engine = ExportEngine(documentsURL: documentsURL, batchBytesLimit: batchBytesLimit)
         exportEngine = engine
         engine.onPlanning = { [weak self] scanned, total in

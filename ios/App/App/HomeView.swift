@@ -121,12 +121,13 @@ struct HomeView: View {
             Text("每批导出上限（导一批 → 电脑拉取校验 → 清理 → 下一批）")
                 .font(.footnote)
                 .foregroundColor(.secondary)
-            Picker("每批上限", selection: $state.batchGB) {
+            Picker("每批上限", selection: $state.batchMB) {
                 Text("不限").tag(0)
-                Text("1 GB").tag(1)
-                Text("2 GB").tag(2)
-                Text("4 GB").tag(4)
-                Text("8 GB").tag(8)
+                Text("500 MB").tag(500)
+                Text("1 GB").tag(1024)
+                Text("2 GB").tag(2048)
+                Text("4 GB").tag(4096)
+                Text("8 GB").tag(8192)
             }
             .pickerStyle(.segmented)
         }

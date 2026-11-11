@@ -311,8 +311,8 @@ final class ExportEngine {
         let strict = values.volumeAvailableCapacity
         let important = values.volumeAvailableCapacityForImportantUsage
         switch (strict, important) {
-        case let (s?, i?): return min(s, i)
-        case let (s?, nil): return s
+        case let (s?, i?): return min(Int64(s), i)
+        case let (s?, nil): return Int64(s)
         case let (nil, i?): return i
         default: return nil
         }
