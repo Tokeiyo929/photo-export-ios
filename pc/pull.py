@@ -147,6 +147,18 @@ async def amain(args: argparse.Namespace) -> int:
             pe_common.log(f"用 {bundle} 打不开沙盒，已清缓存（重跑本命令会重新枚举）。")
         raise
 
+    # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里。
+    # 必须在 manifest 之前：首次导出/沙盒重置后 manifest 可能还不存在，但日志一定在。
+    diagnostics = {"export-log.txt", "export-log.old.txt"}
+    for diag in sorted(diagnostics):
+        try:
+            data = await house.get_file_contents(diag)
+        except Exception:
+            continue
+        target = dest / f"device-{diag}"
+        target.write_bytes(data)
+        pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
+
     # 1) 读清单
     try:
         manifest_bytes = await house.get_file_contents(pe_common.MANIFEST_NAME)
@@ -163,6 +175,8 @@ async def amain(args: argparse.Namespace) -> int:
                   + (f"，损坏行 {malformed}" if malformed else ""))
 
     # 2) 枚举设备端文件（顺带发现清单之外的孤儿文件）
+    # iOS 27 真机实测：AFC 对第三方沙盒「按名读可以，列目录 PERM_DENIED」，
+    # 列不了就跳过孤儿检测，别让整个拉取炸掉。
     device_files: dict[str, int] = {}
 
     async def walk_dir(prefix: str) -> None:
@@ -176,26 +190,15 @@ async def amain(args: argparse.Namespace) -> int:
                 stat = await house.stat(path)
                 device_files[path.lstrip("/")] = stat.get("st_size", 0)
 
-    await walk_dir("")
+    try:
+        await walk_dir("")
+    except Exception as error:
+        pe_common.log(f"设备端文件枚举失败（跳过孤儿检测）：{error}")
     known = {r.relative_path for r in expected}
-    diagnostics = {"export-log.txt", "export-log.old.txt"}
     orphans = [p for p in device_files
                if p != pe_common.MANIFEST_NAME and p not in known and p not in diagnostics]
     if orphans:
         pe_common.log(f"警告：设备上有 {len(orphans)} 个清单外文件（可能是上次失败残留），已跳过不拉。")
-
-    # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里
-    for diag in sorted(diagnostics):
-        if diag not in device_files:
-            continue
-        try:
-            data = await house.get_file_contents(diag)
-        except Exception as error:
-            pe_common.log(f"拉取诊断日志失败 {diag}：{error}")
-            continue
-        target = dest / f"device-{diag}"
-        target.write_bytes(data)
-        pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
 
     # 3) 逐文件拉取 + 校验
     report: list[dict] = []
