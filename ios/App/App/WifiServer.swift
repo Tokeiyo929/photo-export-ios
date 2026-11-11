@@ -46,10 +46,8 @@ final class WifiServer {
         // Bonjour 广播（LocalSend 用 UDP 组播做发现；iOS 原生生态是 Bonjour，
         // PC 端 python zeroconf 一行就接上）——电脑免手打 IP
         let deviceName = UIDevice.current.name
-        let build = (Bundle.main.object(forInfoDictionaryKey: "PEBuild") as? String) ?? "?"
         listener.service = NWListener.Service(name: deviceName,
-                                              type: "_photoexport._tcp.",
-                                              txtRecord: ["app": "photo-export", "build": build])
+                                              type: "_photoexport._tcp.")
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
