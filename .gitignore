@@ -15,3 +15,4 @@ tests/fixtures/
 Thumbs.db
 __pycache__/
 *.pyc
+rel14.json
