@@ -29,17 +29,30 @@ enum SharedGroup {
         return Bundle.main.bundleURL.appendingPathComponent("embedded.mobileprovision")
     }
 
+    /// 自己这份 profile（扩展=自己 .appex 里的；主 App=主 bundle）
+    private static var ownProfileURL: URL? {
+        guard let path = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
     /// 对侧（appex）profile 的清单：主 App 从 PlugIns/ 里枚举；扩展自己那份就是 own
     private static var sideProfileURLs: [URL] {
         if Bundle.main.bundleURL.pathExtension == "appex" {
-            guard let path = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") else { return [] }
-            return [URL(fileURLWithPath: path)]
+            return ownProfileURL.map { [$0] } ?? []
         }
         let plugins = Bundle.main.bundleURL.appendingPathComponent("PlugIns")
         guard let items = try? FileManager.default.contentsOfDirectory(at: plugins, includingPropertiesForKeys: nil) else { return [] }
         return items
             .filter { $0.pathExtension == "appex" }
             .map { $0.appendingPathComponent("embedded.mobileprovision") }
+    }
+
+    /// profile 文件存在性/大小（诊断：区分「文件没嵌进来/路径不对」和「文件在但没组」）
+    private static func profileSizeText(_ url: URL?) -> String {
+        guard let url,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int64 else { return "缺" }
+        return "\(size)B"
     }
 
     /// 解析单份 profile（CMS/DER 包着 XML plist，按字节扫出 plist 段）里的组名与 TeamID
@@ -106,6 +119,7 @@ enum SharedGroup {
             return url
         }
         lastProbeDescription = "FAIL 主AppProfile=\(appSide.groups) appexProfile=\(extSideGroups) "
+            + "profileSize=[主App:\(profileSizeText(mainAppProfileURL)) 自己:\(profileSizeText(ownProfileURL))] "
             + "tried=[\(tried.joined(separator: ", "))]"
             + (roundTripFailed.isEmpty ? "" : " roundTripFail=[\(roundTripFailed.joined(separator: ", "))]")
         return nil
