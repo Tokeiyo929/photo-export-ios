@@ -11,7 +11,11 @@ enum SharedIn {
         forwardExtensionLog()
         let fm = FileManager.default
         guard let inbox = SharedGroup.inboxDirectory(),
-              let queueURL = SharedGroup.queueURL() else { return 0 }
+              let queueURL = SharedGroup.queueURL() else {
+            // 容器都没定位到 = 重签没给组权限/组名改写异常；profile 探测详情落日志（「文件」App 可见）
+            ExportLog.write("GROUP drain: \(SharedGroup.lastProbeDescription)")
+            return 0
+        }
 
         // 读队列（崩溃安全：文件先落盘再记账，这行没有就当下次再收）
         guard let raw = try? String(contentsOf: queueURL, encoding: .utf8) else { return 0 }

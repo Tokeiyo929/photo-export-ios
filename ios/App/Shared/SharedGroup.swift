@@ -1,26 +1,67 @@
 import Foundation
 
-/// App Group 容器定位：免签重签（Sideloadly/AltStore 系）会把 group 名统一改写
-/// （加团队后缀），主 App 和扩展两侧都用同一套候选探测，保证落到同一个容器——
-/// SideStore/AltStore 生态通行做法，容器定位失败就降级为不接分享（不影响主流程）。
+/// App Group 容器定位：免签重签（Sideloadly/AltStore/SideStore 系）会把 group 名
+/// 统一改写（拼团队后缀等规则各家不同、还随版本变），猜名字不可靠——
+/// **profile 是唯一真相**：重签工具打进包里的 embedded.mobileprovision 的
+/// Entitlements 就是最终生效的组名清单（SideStore ResignAppOperation 同款做法，
+/// 它重写 Info.plist 里的组引用时也以 profile.entitlements 为准）。
+/// 主 App 和扩展两侧共用这套探测，各自读自己的 profile，必然落到同一个容器。
 enum SharedGroup {
 
     static let baseGroup = "group.com.tokeiyo929.photoexport"
 
-    /// 探测可用的 group 容器（两侧同一套候选，必然落同一个容器）
+    /// 最近一次 container() 探测的结论（诊断用，主 App 写进 ExportLog）
+    static private(set) var lastProbeDescription = "not probed"
+
+    private static var resolvedContainer: URL?
+
+    /// 读 embedded.mobileprovision（CMS/DER 包着 XML plist，按字节扫出 plist 段）
+    /// 里的真实组名清单
+    private static func provisionedGroupNames(bundle: Bundle = .main) -> [String] {
+        guard let path = bundle.path(forResource: "embedded", ofType: "mobileprovision"),
+              let data = FileManager.default.contents(atPath: path),
+              let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8)),
+              start.lowerBound < end.upperBound else { return [] }
+        let xml = data.subdata(in: start.lowerBound ..< end.upperBound)
+        guard let plist = (try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil)) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any] else { return [] }
+        return (entitlements["com.apple.security.application-groups"] as? [String]) ?? []
+    }
+
+    /// 探测可用的 group 容器（两侧同一套逻辑：先真值后兜底，必然落同一个容器）
     static func container(bundleIdentifier: String = Bundle.main.bundleIdentifier ?? "") -> URL? {
+        if let resolved = resolvedContainer { return resolved }
+        let fm = FileManager.default
+
+        // 1) 真值：重签工具下发的 profile 里实际列出的组名（逐个试，第一个能开的就用）
+        var tried: [String] = []
+        for name in provisionedGroupNames() where name.hasPrefix("group.") {
+            tried.append(name)
+            if let url = fm.containerURL(forSecurityApplicationGroupIdentifier: name) {
+                resolvedContainer = url
+                lastProbeDescription = "resolved=\(name) (profile)"
+                return url
+            }
+        }
+
+        // 2) 兜底：旧启发式（profile 缺失/解析失败时）——原签名直装场景 profile 反而不含组
         var candidates = [baseGroup]
-        // 重签后 bundle id 形如 com.tokeiyo929.photoexport.<团队后缀>；group 名同规则
         if let dot = bundleIdentifier.lastIndex(of: "."),
            bundleIdentifier.hasPrefix("com.tokeiyo929.photoexport") {
             let suffix = String(bundleIdentifier[bundleIdentifier.index(after: dot)...])
             if !suffix.isEmpty { candidates.append("\(baseGroup).\(suffix)") }
         }
-        for candidate in candidates {
-            if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: candidate) {
+        for name in candidates {
+            tried.append(name + "~")
+            if let url = fm.containerURL(forSecurityApplicationGroupIdentifier: name) {
+                resolvedContainer = url
+                lastProbeDescription = "resolved=\(name) (heuristic)"
                 return url
             }
         }
+
+        lastProbeDescription = "FAIL tried=[\(tried.joined(separator: ", "))]"
         return nil
     }
 

@@ -61,8 +61,8 @@ class ShareViewController: UIViewController {
     private func ingest() {
         SharedGroup.appendLog("EXT open")
         guard let inbox = SharedGroup.inboxDirectory() else {
-            SharedGroup.appendLog("EXT no app-group container")
-            fail("无法访问共享容器", detail: "重签后 App Group 未生效，文件没有落点。先打开主 App 一次再重试分享。")
+            SharedGroup.appendLog("EXT no app-group container \(SharedGroup.lastProbeDescription)")
+            fail("无法访问共享容器", detail: "重签后 App Group 未生效，文件没有落点。打开主 App 一次再重试；仍不行把主 App 工作日志 export-log.txt 发来看组名探测详情。")
             return
         }
         let items = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []
