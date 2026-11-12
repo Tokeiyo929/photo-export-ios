@@ -224,6 +224,8 @@ def wifi_pull(args: argparse.Namespace) -> int:
                       "（台式机可用手机个人热点+数据线的 172.20.10.x 地址）")
         return 2
     rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
+    # 清单落盘到 --dest：无损证明链的根（verify.py 复验、查某张照片的哈希都靠它）
+    (dest / pe_common.MANIFEST_NAME).write_bytes(manifest_bytes)
     expected = pe_common.pullable_rows(rows)
     pulled_note = ""
     if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
@@ -417,6 +419,8 @@ async def amain(args: argparse.Namespace) -> int:
         target.write_bytes(data)
         pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
     rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
+    # 清单落盘到 --dest：无损证明链的根（verify.py 复验、查某张照片的哈希都靠它）
+    (dest / pe_common.MANIFEST_NAME).write_bytes(manifest_bytes)
     expected = pe_common.pullable_rows(rows)
     pulled_note = ""
     if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
