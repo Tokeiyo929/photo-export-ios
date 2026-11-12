@@ -4,6 +4,13 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject var state: AppState
     @State private var showCleanConfirm = false
+    @State private var auditLine: String?
+    @State private var auditing = false
+    @State private var showPicker = false
+    @State private var pickerLine: String?
+    @State private var picking = false
+    @State private var pickDone = 0
+    @State private var pickTotal = 0
 
     var body: some View {
         NavigationView {
@@ -13,6 +20,7 @@ struct HomeView: View {
                     libraryCard
                     exportSection
                     cleanCard
+                    rescueCard
                     wifiCard
                     rulesCard
                 }
@@ -307,6 +315,91 @@ struct HomeView: View {
         if result.absent > 0 { text += "，\(result.absent) 个本就不在（改记 PULLED）" }
         if result.failed > 0 { text += "，\(result.failed) 个删除失败（保持 OK，下次再试）" }
         return text
+    }
+
+    /// 漏照片排查：先对账定位「相册看得见、全库抓取拿不到」的照片属于哪一类，
+    /// 再用 PHPicker 补漏把它们接进同一条导出链。从电脑同步的照片 PhotoKit
+    /// 对第三方拿不到是生态级限制（SO 32430410 十年悬案），PHPicker 是标准出路。
+    private var rescueCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("漏照片排查与补漏", systemImage: "questionmark.folder")
+                .font(.headline)
+            Text("相册 App 看得见、全库抓取却拿不到的照片（从电脑同步的、iCloud 共享相簿的），先对账定位，再挑图补进同一条导出链。")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+            if let line = auditLine {
+                Text(line)
+                    .font(.footnote)
+            }
+            Button {
+                runAudit()
+            } label: {
+                Text(auditing ? "对账中…" : "图库对账")
+            }
+            .buttonStyle(.bordered)
+            .disabled(auditing || state.exportRunning)
+            Divider()
+            if let line = pickerLine {
+                Text(line)
+                    .font(.footnote)
+            }
+            if picking {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("接收中 \(pickDone)/\(pickTotal)…")
+                        .font(.footnote)
+                }
+            }
+            Button {
+                showPicker = true
+            } label: {
+                Label("挑照片补漏导入", systemImage: "square.and.plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(picking || state.exportRunning)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+        .sheet(isPresented: $showPicker) {
+            PickerSheet { providers in
+                showPicker = false
+                startPicking(providers)
+            }
+        }
+    }
+
+    private func runAudit() {
+        auditing = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = LibraryAudit.run()
+            DispatchQueue.main.async {
+                auditing = false
+                auditLine = LibraryAudit.describe(result)
+                ExportLog.write("AUDIT \(LibraryAudit.summary(result))")
+            }
+        }
+    }
+
+    private func startPicking(_ providers: [NSItemProvider]) {
+        guard !providers.isEmpty else { return }
+        picking = true
+        pickDone = 0
+        pickTotal = providers.count
+        pickerLine = nil
+        _ = PickerIn.Session(providers: providers,
+                             documentsURL: state.documentsURL,
+                             manifestURL: state.manifestURL,
+                             progress: { done, _ in
+                                 pickDone = done
+                             },
+                             completion: { ok, skipped, failed in
+                                 picking = false
+                                 pickerLine = "补漏导入完成：新增 \(ok) · 重复跳过 \(skipped) · 失败 \(failed)"
+                                     + (failed > 0 ? "（详情见工作日志 export-log.txt）" : "")
+                             })
     }
 
     /// WiFi 直传：iOS 27 数据线 AFC 通道对本 App 服务了错误的容器视图，

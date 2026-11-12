@@ -136,11 +136,16 @@ enum ManifestStore {
         Set(rowDictionary(of: rows).filter { $0.value.status == "OK" || $0.value.status == "PULLED" }.keys)
     }
 
+    private static let ioLock = NSLock()
+
     /// 追加若干行；文件不存在时先写 BOM + 表头。
+    /// ioLock 串行物理写入：引擎拷贝期、分享导入、挑图补漏可能从不同线程并发追加。
     static func append(url: URL, rows: [ManifestRow]) throws {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         let fm = FileManager.default
         if !fm.fileExists(atPath: url.path) {
-            try writeAll(url: url, rows: [])
+            try writeAllUnlocked(url: url, rows: [])
         }
         var payload = ""
         for row in rows { payload += csvLine(for: row) + "\n" }
@@ -152,6 +157,12 @@ enum ManifestStore {
 
     /// 全量重写（BOM + 表头 + 行）。
     static func writeAll(url: URL, rows: [ManifestRow]) throws {
+        ioLock.lock()
+        defer { ioLock.unlock() }
+        try writeAllUnlocked(url: url, rows: rows)
+    }
+
+    private static func writeAllUnlocked(url: URL, rows: [ManifestRow]) throws {
         var text = "\u{FEFF}" + header.joined(separator: ",") + "\n"
         for row in rows { text += csvLine(for: row) + "\n" }
         try text.data(using: .utf8)?.write(to: url, options: .atomic)

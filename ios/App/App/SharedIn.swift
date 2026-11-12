@@ -28,18 +28,10 @@ enum SharedIn {
         }
         guard !entries.isEmpty else { return 0 }
 
-        // 清单一次读入：重复内容守卫用（同名+同哈希 → 分享两次同一张）
-        let (rows, _) = ManifestStore.load(url: manifestURL)
-        var known = Set(rows.map { "\($0.sha256)|\($0.relativePath.split(separator: "/").last.map(String.init) ?? "")" })
-
-        // 重名去重的「已占用」集合：Documents 里现有文件 + 清单里出现过的路径（与引擎同口径小写键）
-        var used = Set(rows.map { $0.relativePath.lowercased() })
-        if let walker = fm.enumerator(at: documentsURL, includingPropertiesForKeys: nil) {
-            let prefix = documentsURL.path + "/"
-            for case let url as URL in walker {
-                used.insert(url.path.replacingOccurrences(of: prefix, with: "").lowercased())
-            }
-        }
+        // 清单一次读入：重复内容守卫 + 重名去重（与挑图补漏共用同口径）
+        let sets = guardSets(documentsURL: documentsURL, manifestURL: manifestURL)
+        var known = sets.known
+        var used = sets.used
 
         var imported = 0
         var skipped = 0
@@ -81,11 +73,29 @@ enum SharedIn {
         return imported
     }
 
+    /// 重复内容守卫 + 重名去重所需的两个集合（分享导入 / 挑图补漏共用同口径）。
+    /// known 键：sha256|文件名（同一张分享两次 → 跳过）；used 键：Documents 现有相对路径（小写）。
+    static func guardSets(documentsURL: URL, manifestURL: URL) -> (known: Set<String>, used: Set<String>) {
+        let fm = FileManager.default
+        let (rows, _) = ManifestStore.load(url: manifestURL)
+        let known = Set(rows.map { "\($0.sha256)|\($0.relativePath.split(separator: "/").last.map(String.init) ?? "")" })
+        var used = Set(rows.map { $0.relativePath.lowercased() })
+        if let walker = fm.enumerator(at: documentsURL, includingPropertiesForKeys: nil) {
+            let prefix = documentsURL.path + "/"
+            for case let url as URL in walker {
+                used.insert(url.path.replacingOccurrences(of: prefix, with: "").lowercased())
+            }
+        }
+        return (known, used)
+    }
+
     /// 单文件：算哈希→定归档目录（EXIF 拍摄时间优先）→消歧落位→出清单行。
     /// 返回 nil 表示重复内容（跳过）；抛错表示搬不动（留在收件箱）。
-    private static func importFile(_ source: URL, documentsURL: URL, inboxFile: String,
-                                   known: inout Set<String>, used: inout Set<String>,
-                                   note: String, iso: ISO8601DateFormatter) throws -> ManifestRow? {
+    /// fallbackNote：note 为空时的来源标注（分享导入/挑图补漏各自标）。
+    static func importFile(_ source: URL, documentsURL: URL, inboxFile: String,
+                           known: inout Set<String>, used: inout Set<String>,
+                           note: String, iso: ISO8601DateFormatter,
+                           fallbackNote: String = "相册分享导入") throws -> ManifestRow? {
         let fm = FileManager.default
         let ext = source.pathExtension.lowercased()
         let isVideo = ["mov", "mp4", "m4v"].contains(ext)
@@ -119,7 +129,7 @@ enum SharedIn {
                            favorite: false,
                            status: "OK",
                            exportedAt: iso.string(from: Date()),
-                           note: note.isEmpty ? "相册分享导入" : note + "（相册分享导入）")
+                           note: note.isEmpty ? fallbackNote : note + "（\(fallbackNote)）")
     }
 
     private static func exifDate(of url: URL) -> Date? {
