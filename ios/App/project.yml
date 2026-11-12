@@ -66,6 +66,15 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # 「分享面板直投」通道：相册分享 → App 行点「无损导出」时系统把原文件拷进
+        # Documents/Inbox 再拉起 App（不走 App Group，免费签名也能用）。
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: 照片或视频
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.image
+              - public.movie
         NSPhotoLibraryUsageDescription: 需要读取相册原片字节（HEIC/JPEG/MOV 保持原始格式，不做任何转码），导出到 App 文件目录后传到电脑。
         NSPhotoLibraryAddUsageDescription: 仅在需要保存导出报告时写入相册（当前版本不使用）。
         NSLocalNetworkUsageDescription: 用于在家庭 WiFi 里把已导出的照片直接传到电脑（电脑运行 pull.py --wifi 或浏览器打开显示的地址）。仅限同一局域网，勿在公共 WiFi 开启。

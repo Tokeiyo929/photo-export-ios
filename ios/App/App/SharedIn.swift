@@ -73,6 +73,53 @@ enum SharedIn {
         return imported
     }
 
+    /// 分享面板「直接打开」（Open in）通道：App 声明 public.image/public.movie 文档类型后，
+    /// 相册分享面板 App 行点「无损导出」时系统把原文件拷进 Documents/Inbox 再拉起 App。
+    /// 这条通道**不依赖 App Group**——免费 Sideloadly 不给组权限时照片也能送进来。
+    /// 每次回前台扫一遍 Inbox（覆盖冷启动没收到 URL 回调、多选分批拷入），
+    /// 落位/登记与分享扩展同一条链（note 标「分享直投」）。
+    static func drainOpenInInbox(documentsURL: URL, manifestURL: URL) -> Int {
+        let fm = FileManager.default
+        let inbox = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
+        guard let items = try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) else { return 0 }
+        let files = items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
+        guard !files.isEmpty else { return 0 }
+
+        let sets = guardSets(documentsURL: documentsURL, manifestURL: manifestURL)
+        var known = sets.known
+        var used = sets.used
+        var pending: [ManifestRow] = []
+        var imported = 0
+        var skipped = 0
+        var failed = 0
+        let iso = ISO8601DateFormatter()
+
+        for url in files {
+            do {
+                if let row = try importFile(url, documentsURL: documentsURL, inboxFile: url.lastPathComponent,
+                                            known: &known, used: &used, note: "", iso: iso,
+                                            fallbackNote: "分享直投") {
+                    pending.append(row)
+                    let base = row.relativePath.split(separator: "/").last.map(String.init) ?? url.lastPathComponent
+                    known.insert("\(row.sha256)|\(base)")
+                    imported += 1
+                } else {
+                    skipped += 1 // 重复内容：同一张照片投了两次
+                }
+                try? fm.removeItem(at: url)
+            } catch {
+                failed += 1
+                ExportLog.write("OPENIN import FAIL \(url.lastPathComponent): \(error)")
+            }
+        }
+
+        if !pending.isEmpty {
+            try? ManifestStore.append(url: manifestURL, rows: pending)
+        }
+        ExportLog.write("OPENIN ok=\(imported) skip=\(skipped) fail=\(failed)")
+        return imported
+    }
+
     /// 重复内容守卫 + 重名去重所需的两个集合（分享导入 / 挑图补漏共用同口径）。
     /// known 键：sha256|文件名（同一张分享两次 → 跳过）；used 键：Documents 现有相对路径（小写）。
     static func guardSets(documentsURL: URL, manifestURL: URL) -> (known: Set<String>, used: Set<String>) {

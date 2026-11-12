@@ -47,5 +47,9 @@ struct RootView: View {
                 .tabItem { Label("电脑", systemImage: "desktopcomputer") }
                 .tag(2)
         }
+        // Documents/Inbox 兜底扫描：冷启动经「分享面板直投」拉起时 scenePhase 没有
+        // 变化回调，onChange 不会触发——这里补一次；已运行时报 URL 也立刻收。
+        .onAppear { state.drainSharedInbox() }
+        .onOpenURL { _ in state.drainSharedInbox() }
     }
 }

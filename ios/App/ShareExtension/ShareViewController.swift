@@ -63,7 +63,7 @@ class ShareViewController: UIViewController {
         guard let inbox = SharedGroup.inboxDirectory() else {
             SharedGroup.appendLog("EXT no app-group container \(SharedGroup.lastProbeDescription)")
             // 弹窗直接携带探测详情：用户截个图，组名真值/试过的候选就全在手里
-            fail("无法访问共享容器", detail: "重签后 App Group 未生效，文件没有落点。探测详情：\(SharedGroup.lastProbeDescription)。打开主 App 一次再重试；仍不行把主 App 工作日志 export-log.txt 发来。")
+            fail("无法访问共享容器", detail: "重签后 App Group 未生效，文件没有落点。探测详情：\(SharedGroup.lastProbeDescription)。\n\n临时可用：返回分享面板，点 App 行里的「照片无损导出」图标（直投通道，不依赖 App Group）。")
             return
         }
         let items = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []

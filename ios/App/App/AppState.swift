@@ -83,7 +83,10 @@ final class AppState: ObservableObject {
         let documents = documentsURL
         let manifest = manifestURL
         Task.detached(priority: .utility) { [weak self] in
+            // 两条通道都收：App Group 收件箱（分享扩展）+ Documents/Inbox（分享面板直投，
+            // 免费 Sideloadly 不给组权限时唯一能走通的路）
             let imported = SharedIn.drain(documentsURL: documents, manifestURL: manifest)
+                + SharedIn.drainOpenInInbox(documentsURL: documents, manifestURL: manifest)
             guard imported > 0 else { return }
             DispatchQueue.main.async {
                 self?.sharedImportedCount = imported
