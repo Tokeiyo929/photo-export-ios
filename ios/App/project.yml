@@ -56,6 +56,10 @@ targets:
         CFBundleShortVersionString: "1.0.0"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         PEBuild: "${PE_BUILD}"
+        # AltStore/SideStore 系重签工具从 Info.plist 读这个键来注册 App Group
+        #（classday-ios 同款）；组名与两个 .entitlements 文件保持一致
+        ALTAppGroups:
+          - group.com.tokeiyo929.photoexport
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

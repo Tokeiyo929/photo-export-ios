@@ -16,6 +16,10 @@
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ALTAppGroups</key>
+	<array>
+		<string>group.com.tokeiyo929.photoexport</string>
+	</array>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionAttributes</key>

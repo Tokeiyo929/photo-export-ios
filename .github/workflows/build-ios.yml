@@ -60,6 +60,11 @@ jobs:
           APP=ios/App/build/Build/Products/Release-iphoneos/App.app
           mkdir -p Payload
           cp -R "$APP" Payload/
+          # 未签名 IPA 的 entitlements 元数据（classday-ios 同款做法）：Mach-O 无签名时，
+          # 重签工具（Sideloadly/AltStore 系）从这里识别要注册的 App Group——没有它们，
+          # profile 里就不会有组，分享扩展永远拿不到共享容器（真机弹窗已实锤）。
+          cp ios/App/App/App.entitlements Payload/App.app/archived-expanded-entitlements.xcent
+          cp ios/App/ShareExtension/ShareExtension.entitlements Payload/App.app/PlugIns/ShareExtension.appex/archived-expanded-entitlements.xcent
           zip -qry photo-export-unsigned.ipa Payload
           rm -rf Payload
           ls -lh photo-export-unsigned.ipa
