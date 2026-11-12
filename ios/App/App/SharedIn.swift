@@ -131,9 +131,8 @@ enum SharedIn {
     private static func videoCreationDate(of url: URL) -> Date? {
         let asset = AVURLAsset(url: url)
         guard let item = AVMetadataItem.metadataItems(from: asset.metadata,
-                                                      filteredByIdentifier: .commonIdentifierCreationDate).first,
-              let date = try? item.load(.dateValue) else { return nil }
-        return date
+                                                      filteredByIdentifier: .commonIdentifierCreationDate).first else { return nil }
+        return item.dateValue
     }
 
     /// 重写队列 = 只剩没搬成的（文件不在的自动销账）
