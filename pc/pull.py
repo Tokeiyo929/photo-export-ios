@@ -552,7 +552,10 @@ async def amain(args: argparse.Namespace) -> int:
     pe_common.log(f"结果：PASS {summary.passed} · 已验证跳过 {summary.skipped_verified} · "
                   f"FAIL {summary.failed} · 总量 {pe_common.bytes_str(summary.total_bytes)}")
     if orphans:
-        pe_common.log(f"清单外文件 {len(orphans)} 个未拉取。")
+        if args.compare_orphans:
+            pe_common.log(f"清单外文件 {len(orphans)} 个已拉到 {dest / '_原图对照'}（对照结果见上）。")
+        else:
+            pe_common.log(f"清单外文件 {len(orphans)} 个未拉取。")
 
     # 5) 护甲 ZIP
     if args.zip:
