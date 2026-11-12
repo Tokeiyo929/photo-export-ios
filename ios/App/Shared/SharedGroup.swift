@@ -36,6 +36,22 @@ enum SharedGroup {
         return root.appendingPathComponent("share-queue.jsonl")
     }
 
+    /// 扩展侧现场日志（追加写 group 根目录 share-log.txt）：
+    /// 分享扩展崩了没有任何报告渠道（连崩溃报告都难拿），把收到的提供者类型、
+    /// 字节数、错误逐行落在这里；主 App 下次 drain 时转写进 ExportLog 带出设备。
+    static func appendLog(_ message: String, root: URL? = nil) {
+        guard let root = root ?? container() else { return }
+        let url = root.appendingPathComponent("share-log.txt")
+        let line = ISO8601DateFormatter().string(from: Date()) + " " + message + "\n"
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: url)
+        }
+    }
+
     /// 扩展侧记账（JSONL 追加）：文件先落盘、再记账，崩溃了也只多不少
     static func enqueue(file: String, note: String?, root: URL? = nil) {
         guard let queue = queueURL(using: root) else { return }

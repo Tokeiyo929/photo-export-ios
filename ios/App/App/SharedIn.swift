@@ -8,6 +8,7 @@ import AVFoundation
 enum SharedIn {
 
     static func drain(documentsURL: URL, manifestURL: URL) -> Int {
+        forwardExtensionLog()
         let fm = FileManager.default
         guard let inbox = SharedGroup.inboxDirectory(),
               let queueURL = SharedGroup.queueURL() else { return 0 }
@@ -149,5 +150,18 @@ enum SharedIn {
                           encoding: .utf8) ?? ""
         }.filter { !$0.isEmpty }
         try? Data((lines.joined(separator: "\n") + "\n").utf8).write(to: queueURL)
+    }
+
+    /// 扩展的现场日志转写进主日志：分享扩展崩了没有任何报告渠道，这是它把
+    /// 证据带出设备的唯一通道（转写完即删，下次分享重新积累）。
+    private static func forwardExtensionLog() {
+        guard let root = SharedGroup.container(),
+              let raw = try? String(contentsOf: root.appendingPathComponent("share-log.txt"),
+                                    encoding: .utf8),
+              !raw.isEmpty else { return }
+        for line in raw.split(separator: "\n") {
+            ExportLog.write(line)
+        }
+        try? FileManager.default.removeItem(at: root.appendingPathComponent("share-log.txt"))
     }
 }
