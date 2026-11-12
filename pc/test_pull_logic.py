@@ -307,5 +307,31 @@ class WifiPullTest(unittest.TestCase):
         self.assertEqual(statuses, ["FAIL"])
 
 
+class CompareOriginalsTest(unittest.TestCase):
+    """原图对照（--compare-orphans）的匹配逻辑：系统「导出未修改的原片」当独立裁判。"""
+
+    def test_index_by_basename_and_verdict(self):
+        import pull
+        rows = [
+            pe_common.ManifestRow(relative_path="2024/2024-01-01/IMG_1.JPG",
+                                  sha256=hashlib.sha256(b"v2024").hexdigest(), size=5),
+            pe_common.ManifestRow(relative_path="2025/2025-01-01/IMG_1.JPG",
+                                  sha256=hashlib.sha256(b"v2025").hexdigest(), size=5),
+            pe_common.ManifestRow(relative_path="2024/2024-01-01/IMG_1.MOV",
+                                  sha256=hashlib.sha256(b"live").hexdigest(), size=4),
+        ]
+        index = pull.index_by_basename(rows)
+        self.assertEqual(len(index["IMG_1.JPG"]), 2)  # 跨年份重名都保留
+        self.assertEqual(len(index["IMG_1.MOV"]), 1)
+        # 字节哈希命中重名行之一 → 判一致（命中的是 2025 那张）
+        sha_2025 = hashlib.sha256(b"v2025").hexdigest()
+        hit = next((r for r in index["IMG_1.JPG"] if r.sha256 == sha_2025), None)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.relative_path, "2025/2025-01-01/IMG_1.JPG")
+        # 哈希谁都不匹配 → mismatch 分支（hit 为 None）
+        self.assertIsNone(next((r for r in index["IMG_1.JPG"]
+                                 if r.sha256 == hashlib.sha256(b"other").hexdigest()), None))
+
+
 if __name__ == "__main__":
     unittest.main()

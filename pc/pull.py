@@ -61,6 +61,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zip", action="store_true", help="校验通过后打仅存储 ZIP")
     parser.add_argument("--fast-resume", action="store_true",
                         help="续跑时同大小文件不重算哈希（快，但少一道证明）")
+    parser.add_argument("--compare-orphans", action="store_true",
+                        help="原图对照：把清单外文件（你在相册用系统「导出未修改的原片」"
+                             "分享进本 App 的）也拉到 _原图对照/ 并与清单哈希逐个比对")
     return parser.parse_args()
 
 
@@ -191,6 +194,14 @@ def _wifi_discover(timeout_seconds: float = 10.0) -> str:
     url = next(iter(found.values()))
     pe_common.log(f"已发现手机：{url}")
     return url
+
+
+def index_by_basename(rows) -> dict:
+    """清单行按文件名（basename）索引；同名多行（跨年份重名/实况视频对）保留全部。"""
+    index: dict[str, list] = {}
+    for r in rows:
+        index.setdefault(Path(r.relative_path).name, []).append(r)
+    return index
 
 
 def wifi_pull(args: argparse.Namespace) -> int:
@@ -440,7 +451,7 @@ async def amain(args: argparse.Namespace) -> int:
     known = {r.relative_path for r in expected}
     orphans = [p for p in device_files
                if p != pe_common.MANIFEST_NAME and p not in known and p not in diagnostics]
-    if orphans:
+    if orphans and not args.compare_orphans:
         pe_common.log(f"警告：设备上有 {len(orphans)} 个清单外文件（可能是上次失败残留），已跳过不拉。")
 
     # 3) 逐文件拉取 + 校验
@@ -489,6 +500,50 @@ async def amain(args: argparse.Namespace) -> int:
             summary.total_bytes += actual_size
             report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "PASS", ""))
             pe_common.log(f"{prefix} PASS  {rel}  ({pe_common.bytes_str(actual_size)})")
+
+    # 3.5) 原图对照（独立裁判）：用户在相册 App 用系统自带「导出未修改的原片」分享到
+    # 本 App（文件会落进沙盒 Documents），这些文件对清单而言是「清单外文件」。
+    # 拉回来按文件名对清单哈希逐个比对——系统 UI 导出 vs 我们的 PHAssetResource 直出，
+    # 字节一致 = 真原图实锤（相册那个菜单背后就是同一个原始资源 API，但空口无凭，对出证据来）。
+    if args.compare_orphans and orphans:
+        compare_dir = dest / "_原图对照"
+        compare_dir.mkdir(exist_ok=True)
+        pe_common.log(f"原图对照：拉取 {len(orphans)} 个清单外文件（系统导出的原片）…")
+        for rel in orphans:
+            sub = compare_dir
+            base = Path(rel).name
+            # 同名落位冲突就进序号子目录，别覆盖
+            n = 1
+            while (sub / base).exists():
+                n += 1
+                sub = compare_dir / str(n)
+            sub.mkdir(parents=True, exist_ok=True)
+            try:
+                await house.pull(rooted(rel), str(sub))
+            except Exception as error:
+                pe_common.log(f"[对照] {base} 拉取失败：{error}")
+        # 对照：basename 匹配清单行 → 哈希比对（含 PULLED/FAIL 行——对照不限状态）
+        by_base = index_by_basename(pe_common.last_wins(rows))
+        verified = mismatched = unmatched = 0
+        for path in sorted(compare_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            matches = by_base.get(path.name, [])
+            if not matches:
+                unmatched += 1
+                pe_common.log(f"[对照] {path.name} —— 清单里没有同名文件，跳过")
+                continue
+            actual = pe_common.sha256_file(path)
+            hit = next((r for r in matches if r.sha256 == actual), None)
+            if hit:
+                verified += 1
+                pe_common.log(f"[对照] {path.name} ↔ {hit.relative_path}  PASS（字节一致，真原图实锤）")
+            else:
+                mismatched += 1
+                pe_common.log(f"[对照] {path.name} ↔ {matches[0].relative_path}  FAIL（哈希不一致！系统导出≠我们的导出，必须查）")
+        pe_common.log(f"对照结果：一致 {verified} · 不一致 {mismatched} · 无同名清单行 {unmatched}")
+        if mismatched:
+            pe_common.log("存在不一致！把上面的 [对照] FAIL 行整段反馈回来排查。")
 
     # 4) 报告与总结
     report_path = pe_common.default_report_path(dest)

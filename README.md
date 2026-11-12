@@ -86,6 +86,12 @@ python pc/pull.py --dest D:\相册导出 --zip    # 全 PASS 后顺手打仅存�
 - 中断（拔线/断电）后**重跑同一条命令即续跑**，已验证文件自动跳过；`--fast-resume` 连哈希都不重算（快，但少一道证明）
 - 手机上要先跑过一次导出，`Documents/manifest.csv` 存在才能拉
 
+**真原图证明（双路对照，给不放心的人）**：App 导出与相册「导出未修改的原片」背后是**同一个** PhotoKit 原始资源 API（`PHAssetResource` 的 `.photo`/`.video`，编辑版 `.fullSizePhoto` 两边都不碰）——但空口无凭，对出证据来：
+
+1. 手机相册挑 2-3 张**未编辑过**的照片（HEIC/JPG/实况各一最好）→ 分享 → **存储到文件** → 「我的 iPhone」→ 照片无损导出
+2. 数据线跑 `python pc/pull.py --dest 目标目录 --compare-orphans`（这些系统导出的文件会进 `_原图对照/` 并自动与清单哈希逐个比对）
+3. `[对照] IMG_xxxx.HEIC ↔ ... PASS（字节一致）` = 系统 UI 导出的字节和我们导出的字节**完全相同**，真原图实锤
+
 ### 方式 B：爱思助手/iMazing 手动导出 + 校验兜底
 
 在爱思助手「应用游戏 → 本机应用 → 文件共享」（或 iMazing）把 App 的 `Documents/` 整个拖出来，然后：
