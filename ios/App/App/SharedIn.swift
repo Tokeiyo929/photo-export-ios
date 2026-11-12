@@ -160,7 +160,7 @@ enum SharedIn {
                                     encoding: .utf8),
               !raw.isEmpty else { return }
         for line in raw.split(separator: "\n") {
-            ExportLog.write(line)
+            ExportLog.write(String(line))
         }
         try? FileManager.default.removeItem(at: root.appendingPathComponent("share-log.txt"))
     }
