@@ -95,6 +95,58 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// 分享面板直投：系统递来的文件 URL（LSSupportsOpeningDocumentsInPlace=true 时是
+    /// 原件 URL，需要 security-scope；系统拷到 Inbox 时则交给 drainSharedInbox 统一扫）。
+    func receiveOpenIn(_ url: URL) {
+        guard !exportRunning else { return }
+        let documents = documentsURL
+        if url.path.hasPrefix(documents.appendingPathComponent("Inbox").path + "/") {
+            drainSharedInbox()
+            return
+        }
+        let manifest = manifestURL
+        Task.detached(priority: .utility) { [weak self] in
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            // in-place 原件（Files/iCloud 地址）先拷进 Inbox 再走同一条链——importFile 会 move，
+            // 直接 move 会把用户原目录里的文件搬走
+            var source = url
+            if scoped {
+                let staged = documents.appendingPathComponent("Inbox", isDirectory: true)
+                    .appendingPathComponent(url.lastPathComponent)
+                do {
+                    try FileManager.default.createDirectory(at: staged.deletingLastPathComponent(),
+                                                            withIntermediateDirectories: true)
+                    try? FileManager.default.removeItem(at: staged)
+                    try FileManager.default.copyItem(at: url, to: staged)
+                    source = staged
+                } catch {
+                    ExportLog.write("OPENIN stage FAIL \(url.lastPathComponent): \(error)")
+                    return
+                }
+            }
+            let sets = SharedIn.guardSets(documentsURL: documents, manifestURL: manifest)
+            var known = sets.known
+            var used = sets.used
+            do {
+                if let row = try SharedIn.importFile(source, documentsURL: documents, inboxFile: url.lastPathComponent,
+                                                     known: &known, used: &used, note: "",
+                                                     iso: ISO8601DateFormatter(), fallbackNote: "分享直投") {
+                    try? ManifestStore.append(url: manifest, rows: [row])
+                    ExportLog.write("OPENIN url ok=\(url.lastPathComponent)")
+                    DispatchQueue.main.async {
+                        self?.sharedImportedCount += 1
+                        self?.loadManifest()
+                    }
+                } else {
+                    ExportLog.write("OPENIN url skip=dup \(url.lastPathComponent)")
+                }
+            } catch {
+                ExportLog.write("OPENIN url FAIL \(url.lastPathComponent): \(error)")
+            }
+        }
+    }
+
     var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
