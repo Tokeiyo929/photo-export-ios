@@ -18,13 +18,37 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: App
+      - path: Shared
+    dependencies:
+      - target: ShareExtension
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tokeiyo929.photoexport
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/App.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  # 相册分享入口：选图 → 分享 → 「无损导出」。文件经 App Group 收件箱交主 App
+  # 登记（Nextcloud 文件摄取模式 + LocalSend 壳配置 + SideStore 重签群组探测）。
+  ShareExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: ShareExtension
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tokeiyo929.photoexport.ShareExtension
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: ShareExtension/ShareExtension.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
     info:
       path: App/Info.plist
       properties:

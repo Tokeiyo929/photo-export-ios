@@ -20,7 +20,10 @@ struct PhotoExportApp: App {
                     case .background: name = "background"
                     @unknown default: name = "unknown"
                     }
-                    if phase == .active { state.reassertKeepAwakeIfNeeded() }
+                    if phase == .active {
+                        state.reassertKeepAwakeIfNeeded()
+                        state.drainSharedInbox() // 相册分享来的文件落位登记
+                    }
                     ExportLog.write("LIFECYCLE \(name) exportRunning=\(state.exportRunning) idle=\(UIApplication.shared.isIdleTimerDisabled)")
                 }
         }

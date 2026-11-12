@@ -73,6 +73,24 @@ final class AppState: ObservableObject {
 
     @Published var wifiRunning = false
     @Published var wifiURLs: [String] = []
+    /// 分享导入待登记提示（首页卡片显示）
+    @Published var sharedImportedCount = 0
+
+    /// 相册「分享→无损导出」的收件箱落位：搬进 Documents + 登记清单。
+    /// 导出运行中不动文件系统（避免引擎枚举时目录在变）。
+    func drainSharedInbox() {
+        guard !exportRunning else { return }
+        let documents = documentsURL
+        let manifest = manifestURL
+        Task.detached(priority: .utility) { [weak self] in
+            let imported = SharedIn.drain(documentsURL: documents, manifestURL: manifest)
+            guard imported > 0 else { return }
+            DispatchQueue.main.async {
+                self?.sharedImportedCount = imported
+                self?.loadManifest()
+            }
+        }
+    }
 
     var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
