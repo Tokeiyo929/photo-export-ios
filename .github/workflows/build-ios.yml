@@ -65,6 +65,18 @@ jobs:
           # profile 里就不会有组，分享扩展永远拿不到共享容器（真机弹窗已实锤）。
           cp ios/App/App/App.entitlements Payload/App.app/archived-expanded-entitlements.xcent
           cp ios/App/ShareExtension/ShareExtension.entitlements Payload/App.app/PlugIns/ShareExtension.appex/archived-expanded-entitlements.xcent
+          # 真正让重签工具「看见」entitlements 的做法（LiveContainer CI 同款，源码实证）：
+          # 开源重签栈只从 Mach-O 代码签名读 entitlements——
+          #   AltStore/AltSign: ldid.cpp Entitlements() 读 CSSLOT_ENTITLEMENTS blob
+          #   SideStore/SideSign: MachOParser.entitlements() 读同一 slot，无签名直接返回 ""
+          # 未签名的二进制这两处都是空 → profile 不会带组。ldid -S 写一个伪签名
+          # （ad-hoc + entitlements）进去，组名才进得了探测/注册链路；.xcent 只是给
+          # 认这个文件名的工具兜底，两者并存不冲突。
+          brew install ldid
+          ldid -S ios/App/App/App.entitlements Payload/App.app/App
+          ldid -S ios/App/ShareExtension/ShareExtension.entitlements Payload/App.app/PlugIns/ShareExtension.appex/ShareExtension
+          # 自检：伪签名里必须真的能读回组名，否则整条链路又静默变空
+          ldid -e Payload/App.app/App | grep application-groups
           zip -qry photo-export-unsigned.ipa Payload
           rm -rf Payload
           ls -lh photo-export-unsigned.ipa
