@@ -78,6 +78,24 @@ jobs:
             Payload/App.app/PlugIns/ShareExtension.appex/ShareExtension
           # 自检：伪签名里必须真的能读回组名，否则整条链路又静默变空
           codesign -d --entitlements :- Payload/App.app/App 2>/dev/null | grep application-groups
+          # SideStore 注册 App ID 时 appIdName 不吃非 ASCII（classday 同款踩坑）：
+          # 打包态给 ASCII 显示名，中文名走 zh-Hans 本地化，设备上仍显示中文
+          python3 - <<'PYEOF'
+          import plistlib, os
+          app = "Payload/App.app"
+          pairs = [("", "PhotoExport", "照片无损导出"),
+                   ("PlugIns/ShareExtension.appex", "PhotoExport Share", "无损导出")]
+          for sub, ascii_name, zh_name in pairs:
+              info = os.path.join(app, sub, "Info.plist")
+              d = plistlib.load(open(info, "rb"))
+              d["CFBundleDisplayName"] = ascii_name
+              plistlib.dump(d, open(info, "wb"), fmt=plistlib.FMT_BINARY)
+              loc = os.path.join(app, sub, "zh-Hans.lproj")
+              os.makedirs(loc, exist_ok=True)
+              with open(os.path.join(loc, "InfoPlist.strings"), "w", encoding="utf-8") as f:
+                  f.write('"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";\n' % (zh_name, zh_name))
+          print("patched display names for SideStore")
+          PYEOF
           zip -qry photo-export-unsigned.ipa Payload
           rm -rf Payload
           ls -lh photo-export-unsigned.ipa
