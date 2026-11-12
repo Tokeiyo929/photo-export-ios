@@ -64,10 +64,12 @@ relative_path,size,sha256,date_source,asset_id,media_type,favorite,status,export
 5. 构建 Debug 模拟器包，注入两张 fixture 照片 + 相册授权，`-autoSmoke` 四页巡访截图（含真实小导出）、`-autoTest` 应用内自测
 6. 上传 artifact 并把 IPA 发布到 Release
 
-安装：
+安装（两条路，按需要的功能选）：
 
 1. 到仓库 Releases 下载 `photo-export-unsigned.ipa`
-2. Windows 上用 [Sideloadly](https://sideloadly.io)（或 AltStore）+ Apple ID 重签后安装到手机
+2. **Sideloadly（最省事）**：Windows 上用 [Sideloadly](https://sideloadly.io) + 免费 Apple ID 重签安装。免费版没有 Custom Entitlements（Patreon 门禁），**App Group 注册不出来** → 分享扩展会报「无法访问共享容器」，用分享面板 App 行的「照片无损导出」直投通道替代（见上）。
+3. **SideStore（要分享扩展按钮就走这条）**：[SideStore](https://sidestore.io) 免费开源、免费 Apple ID 可用。PC 装 iTunes + [iloader](https://iloader.io) 初始安装，手机装免费 App Store 应用 LocalDevVPN 供 7 天刷新；SideStore 从 IPA 的 Mach-O 签名读 entitlements（本仓库 CI 已用 `codesign` 写入 App Group），会到 portal 注册组并下发到两份 profile。
+   注意：换装会换 bundle id（Sideloadly 装的是 `...photoexport.FBTKZ8C6QB`），手机端旧容器/清单拿不到——先拉取一遍再换。
 
 ## PC 端：拉取路径
 
