@@ -36,6 +36,10 @@ final class AppState: ObservableObject {
 
     @Published var authorization: PHAuthorizationStatus = .notDetermined
     @Published var libraryCount = 0
+    /// 引擎同款全库 fetch 看到的最早/最晚拍摄时间——和相册 App 里看到的时间范围对账：
+    /// 对不上 = 有照片不在抓取范围（已隐藏/共享相簿不进 PHAsset 全库抓取），导出会漏
+    @Published var libraryEarliest: Date?
+    @Published var libraryLatest: Date?
     @Published var estimatedBytes: Int64 = 0
     @Published var freeBytes: Int64 = 0
     @Published var estimating = false
@@ -64,6 +68,8 @@ final class AppState: ObservableObject {
     private var keepAwakeTimer: Timer?
     private var wifiServer: WifiServer?
     private var autoTestScheduled = false
+
+    static let iso: ISO8601DateFormatter = ISO8601DateFormatter()
 
     @Published var wifiRunning = false
     @Published var wifiURLs: [String] = []
@@ -114,7 +120,15 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 self.authorization = status
                 guard status == .authorized || status == .limited else { return }
-                self.libraryCount = PhotoLibraryService.fetchAllAssets().count
+                let fetch = PhotoLibraryService.fetchAllAssets() // 引擎同款：creationDate 升序
+                self.libraryCount = fetch.count
+                self.libraryEarliest = fetch.firstObject?.creationDate
+                self.libraryLatest = fetch.lastObject?.creationDate
+                ExportLog.write(String(
+                    format: "LIBRARY count=%d earliest=%@ latest=%@",
+                    fetch.count,
+                    self.libraryEarliest.map { Self.iso.string(from: $0) } ?? "nil",
+                    self.libraryLatest.map { Self.iso.string(from: $0) } ?? "nil"))
                 self.refreshEstimate()
             }
         }

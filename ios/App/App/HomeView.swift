@@ -73,9 +73,19 @@ struct HomeView: View {
     }
 
     private var librarySummary: String {
-        if state.estimating { return "相册 \(state.libraryCount) 项 · 预计统计中…" }
-        if state.estimatedBytes > 0 { return "相册 \(state.libraryCount) 项 · 预计 \(bytesString(state.estimatedBytes))" }
-        return "相册 \(state.libraryCount) 项 · 大库分批模式（逐批显示大小）"
+        var range = ""
+        if let earliest = state.libraryEarliest {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            var text = "最早 \(formatter.string(from: earliest))"
+            if let latest = state.libraryLatest {
+                text += " · 最晚 \(formatter.string(from: latest))"
+            }
+            range = " · " + text
+        }
+        if state.estimating { return "相册 \(state.libraryCount) 项\(range) · 预计统计中…" }
+        if state.estimatedBytes > 0 { return "相册 \(state.libraryCount) 项\(range) · 预计 \(bytesString(state.estimatedBytes))" }
+        return "相册 \(state.libraryCount) 项\(range) · 大库分批模式（逐批显示大小）"
     }
 
     private var permissionText: String {
