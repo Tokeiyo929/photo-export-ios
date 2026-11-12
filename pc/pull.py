@@ -509,9 +509,14 @@ async def amain(args: argparse.Namespace) -> int:
         compare_dir = dest / "_原图对照"
         compare_dir.mkdir(exist_ok=True)
         pe_common.log(f"原图对照：拉取 {len(orphans)} 个清单外文件（系统导出的原片）…")
+        existing = [(p.name, p.stat().st_size) for p in compare_dir.rglob("*") if p.is_file()]
         for rel in orphans:
-            sub = compare_dir
             base = Path(rel).name
+            # 之前对照拉过同名同大小的就跳过（对照目录不越积越多）
+            if (base, device_files.get(rel, 0)) in existing:
+                pe_common.log(f"[对照] {base} 已在对照目录里，跳过拉取")
+                continue
+            sub = compare_dir
             # 同名落位冲突就进序号子目录，别覆盖
             n = 1
             while (sub / base).exists():
