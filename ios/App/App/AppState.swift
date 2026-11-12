@@ -195,6 +195,9 @@ final class AppState: ObservableObject {
         setKeepAwake(true) // 屏幕常亮，保证前台稳定跑完
         print("PE EXPORT: start batchLimit=\(batchMB == 0 ? "unlimited" : "\(batchMB)MB")")
         ExportLog.write("EXPORT start build=\(buildLabel) batchMB=\(batchMB) library=\(libraryCount) free=\(bytesString(freeBytes))")
+        // 顺路探测一次 App Group：组解析详情随日志落地（排查分享链路的常驻证据源）
+        _ = SharedGroup.container()
+        ExportLog.write("GROUP \(SharedGroup.lastProbeDescription)")
         let engine = ExportEngine(documentsURL: documentsURL, batchBytesLimit: batchBytesLimit)
         exportEngine = engine
         engine.onPlanning = { [weak self] scanned, total in

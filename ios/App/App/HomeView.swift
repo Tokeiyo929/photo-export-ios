@@ -117,6 +117,9 @@ struct HomeView: View {
 
     @ViewBuilder
     private var exportSection: some View {
+        // 档位选择器常驻：批次跑完后也要能改档（此前被结果卡片顶掉，下一批只能沿用旧档位）
+        batchPicker
+            .disabled(state.exportRunning)
         if state.exportRunning {
             runningCard
         } else if let summary = state.lastFinished {
@@ -130,7 +133,6 @@ struct HomeView: View {
             }
             .buttonStyle(.borderedProminent)
         } else {
-            batchPicker
             Button {
                 state.startExport()
             } label: {
@@ -158,6 +160,11 @@ struct HomeView: View {
                 Text("8 GB").tag(8192)
             }
             .pickerStyle(.segmented)
+            if state.exportRunning {
+                Text("引擎已按开始时刻的档位在跑，这里改的对下一批生效")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 

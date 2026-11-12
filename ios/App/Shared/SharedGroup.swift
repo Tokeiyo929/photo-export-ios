@@ -15,11 +15,33 @@ enum SharedGroup {
 
     private static var resolvedContainer: URL?
 
-    /// 读 embedded.mobileprovision（CMS/DER 包着 XML plist，按字节扫出 plist 段）
-    /// 里的真实组名清单
-    private static func provisionedGroupNames(bundle: Bundle = .main) -> [String] {
-        guard let path = bundle.path(forResource: "embedded", ofType: "mobileprovision"),
-              let data = FileManager.default.contents(atPath: path),
+    /// 组名真值的读取规则（两侧一致，必然落同一个容器）：
+    /// 扩展优先读**主 App** 的 profile（沿 .appex→PlugIns→.app 路径）——重签工具
+    /// 可能只在主 App 里嵌 profile；主 App 读自己的。都取不到再退自己那份。
+    private static func provisionedGroupNames() -> [String] {
+        var profiles: [URL] = []
+        if Bundle.main.bundleURL.pathExtension == "appex" {
+            let parentProfile = Bundle.main.bundleURL
+                .deletingLastPathComponent()              // PlugIns/
+                .deletingLastPathComponent()              // 主 .app/
+                .appendingPathComponent("embedded.mobileprovision")
+            profiles.append(parentProfile)
+        }
+        if let own = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") {
+            profiles.append(URL(fileURLWithPath: own))
+        }
+        var names: [String] = []
+        for profile in profiles {
+            for name in groupsInProfile(at: profile) where name.hasPrefix("group.") && !names.contains(name) {
+                names.append(name)
+            }
+        }
+        return names
+    }
+
+    /// 解析单个 profile（CMS/DER 包着 XML plist，按字节扫出 plist 段）
+    private static func groupsInProfile(at url: URL) -> [String] {
+        guard let data = try? Data(contentsOf: url),
               let start = data.range(of: Data("<?xml".utf8)),
               let end = data.range(of: Data("</plist>".utf8)),
               start.lowerBound < end.upperBound else { return [] }
