@@ -1,89 +1,113 @@
 import Foundation
 
-/// App Group 容器定位：免签重签（Sideloadly/AltStore/SideStore 系）会把 group 名
-/// 统一改写（拼团队后缀等规则各家不同、还随版本变），猜名字不可靠——
-/// **profile 是唯一真相**：重签工具打进包里的 embedded.mobileprovision 的
-/// Entitlements 就是最终生效的组名清单（SideStore ResignAppOperation 同款做法，
-/// 它重写 Info.plist 里的组引用时也以 profile.entitlements 为准）。
-/// 主 App 和扩展两侧共用这套探测，各自读自己的 profile，必然落到同一个容器。
+/// App Group 容器定位：免签重签（Sideloadly/AltStore/SideStore 系）下免费团队
+/// 常常认领不了原始组名，签名端会注册「带团队后缀的组」写进两份 profile——
+/// 所以**profile 是唯一真相**（SideStore ResignAppOperation 同款），且必须
+/// 主 App 和扩展两份 profile 都读：交集才是保证同容器的组名。
+/// 候选/采纳规则对齐 classday-ios 的免签同场景实现：
+/// 原名 → 两份 profile 交集 → 并集 → 重签生态常见改写形（拼 TeamID/bundle id），
+/// 采纳第一个 containerURL 能开 **且** UserDefaults(suiteName:) 能落笔回读的。
 enum SharedGroup {
 
     static let baseGroup = "group.com.tokeiyo929.photoexport"
 
-    /// 最近一次 container() 探测的结论（诊断用，主 App 写进 ExportLog）
+    /// 最近一次 container() 探测的结论（诊断用，失败弹窗/主 App 日志都带它）
     static private(set) var lastProbeDescription = "not probed"
 
     private static var resolvedContainer: URL?
 
-    /// 组名真值的读取规则（两侧一致，必然落同一个容器）：
-    /// 扩展优先读**主 App** 的 profile（沿 .appex→PlugIns→.app 路径）——重签工具
-    /// 可能只在主 App 里嵌 profile；主 App 读自己的。都取不到再退自己那份。
-    private static func provisionedGroupNames() -> [String] {
-        var profiles: [URL] = []
+    // MARK: - profile 解析
+
+    /// 主 App bundle 的 profile（两侧都能读到：扩展沿 .appex→PlugIns→.app）
+    private static var mainAppProfileURL: URL {
         if Bundle.main.bundleURL.pathExtension == "appex" {
-            let parentProfile = Bundle.main.bundleURL
+            return Bundle.main.bundleURL
                 .deletingLastPathComponent()              // PlugIns/
                 .deletingLastPathComponent()              // 主 .app/
                 .appendingPathComponent("embedded.mobileprovision")
-            profiles.append(parentProfile)
         }
-        if let own = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") {
-            profiles.append(URL(fileURLWithPath: own))
-        }
-        var names: [String] = []
-        for profile in profiles {
-            for name in groupsInProfile(at: profile) where name.hasPrefix("group.") && !names.contains(name) {
-                names.append(name)
-            }
-        }
-        return names
+        return Bundle.main.bundleURL.appendingPathComponent("embedded.mobileprovision")
     }
 
-    /// 解析单个 profile（CMS/DER 包着 XML plist，按字节扫出 plist 段）
-    private static func groupsInProfile(at url: URL) -> [String] {
+    /// 对侧（appex）profile 的清单：主 App 从 PlugIns/ 里枚举；扩展自己那份就是 own
+    private static var sideProfileURLs: [URL] {
+        if Bundle.main.bundleURL.pathExtension == "appex" {
+            guard let path = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision") else { return [] }
+            return [URL(fileURLWithPath: path)]
+        }
+        let plugins = Bundle.main.bundleURL.appendingPathComponent("PlugIns")
+        guard let items = try? FileManager.default.contentsOfDirectory(at: plugins, includingPropertiesForKeys: nil) else { return [] }
+        return items
+            .filter { $0.pathExtension == "appex" }
+            .map { $0.appendingPathComponent("embedded.mobileprovision") }
+    }
+
+    /// 解析单份 profile（CMS/DER 包着 XML plist，按字节扫出 plist 段）里的组名与 TeamID
+    private static func groupsAndTeams(in url: URL) -> (groups: [String], teams: [String]) {
         guard let data = try? Data(contentsOf: url),
               let start = data.range(of: Data("<?xml".utf8)),
               let end = data.range(of: Data("</plist>".utf8)),
-              start.lowerBound < end.upperBound else { return [] }
+              start.lowerBound < end.upperBound else { return ([], []) }
         let xml = data.subdata(in: start.lowerBound ..< end.upperBound)
-        guard let plist = (try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil)) as? [String: Any],
-              let entitlements = plist["Entitlements"] as? [String: Any] else { return [] }
-        return (entitlements["com.apple.security.application-groups"] as? [String]) ?? []
+        guard let plist = (try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil)) as? [String: Any] else { return ([], []) }
+        let groups = ((plist["Entitlements"] as? [String: Any])?["com.apple.security.application-groups"] as? [String]) ?? []
+        let teams = (plist["TeamIdentifier"] as? [String]) ?? []
+        return (groups.filter { $0.hasPrefix("group.") }, teams.filter { !$0.isEmpty })
     }
 
-    /// 探测可用的 group 容器（两侧同一套逻辑：先真值后兜底，必然落同一个容器）
+    // MARK: - 候选与采纳
+
+    /// 探测可用的 group 容器（两侧同一套逻辑，必然落同一个容器）
     static func container(bundleIdentifier: String = Bundle.main.bundleIdentifier ?? "") -> URL? {
         if let resolved = resolvedContainer { return resolved }
-        let fm = FileManager.default
 
-        // 1) 真值：重签工具下发的 profile 里实际列出的组名（逐个试，第一个能开的就用）
-        var tried: [String] = []
-        for name in provisionedGroupNames() where name.hasPrefix("group.") {
-            tried.append(name)
-            if let url = fm.containerURL(forSecurityApplicationGroupIdentifier: name) {
-                resolvedContainer = url
-                lastProbeDescription = "resolved=\(name) (profile)"
-                return url
-            }
+        let appSide = groupsAndTeams(in: mainAppProfileURL)
+        var extSideGroups: [String] = []
+        var teams = appSide.teams
+        for url in sideProfileURLs {
+            let parsed = groupsAndTeams(in: url)
+            extSideGroups += parsed.groups
+            for team in parsed.teams where !teams.contains(team) { teams.append(team) }
         }
 
-        // 2) 兜底：旧启发式（profile 缺失/解析失败时）——原签名直装场景 profile 反而不含组
+        // 候选清单：原名 → 交集（两份都列 = 保证同容器）→ 并集（某份缺失/解析失败时）→ 改写形
         var candidates = [baseGroup]
-        if let dot = bundleIdentifier.lastIndex(of: "."),
-           bundleIdentifier.hasPrefix("com.tokeiyo929.photoexport") {
-            let suffix = String(bundleIdentifier[bundleIdentifier.index(after: dot)...])
-            if !suffix.isEmpty { candidates.append("\(baseGroup).\(suffix)") }
+        for name in appSide.groups where extSideGroups.contains(name) && !candidates.contains(name) {
+            candidates.append(name)
         }
-        for name in candidates {
-            tried.append(name + "~")
-            if let url = fm.containerURL(forSecurityApplicationGroupIdentifier: name) {
-                resolvedContainer = url
-                lastProbeDescription = "resolved=\(name) (heuristic)"
-                return url
+        for name in appSide.groups + extSideGroups where !candidates.contains(name) {
+            candidates.append(name)
+        }
+        let rawBase = String(baseGroup.dropFirst("group.".count))
+        for team in teams {
+            for form in ["\(baseGroup).\(team)", "group.\(team).\(rawBase)",
+                         "group.\(bundleIdentifier)", "group.\(bundleIdentifier).\(team)",
+                         "group.\(team).\(bundleIdentifier)"] {
+                if !candidates.contains(form) { candidates.append(form) }
             }
         }
 
-        lastProbeDescription = "FAIL tried=[\(tried.joined(separator: ", "))]"
+        let fm = FileManager.default
+        var tried: [String] = []
+        var roundTripFailed: [String] = []
+        for name in candidates {
+            tried.append(name)
+            guard let url = fm.containerURL(forSecurityApplicationGroupIdentifier: name) else { continue }
+            // 双确认：容器能开 + UserDefaults 能落笔回读（classday 同款 round-trip）
+            let defaults = UserDefaults(suiteName: name)
+            defaults?.set(true, forKey: "photoexport.group.probe")
+            guard defaults?.bool(forKey: "photoexport.group.probe") == true else {
+                roundTripFailed.append(name)
+                continue
+            }
+            defaults?.removeObject(forKey: "photoexport.group.probe")
+            resolvedContainer = url
+            lastProbeDescription = "resolved=\(name)（主App profile \(appSide.groups.count) 组 / appex profile \(extSideGroups.count) 组）"
+            return url
+        }
+        lastProbeDescription = "FAIL 主AppProfile=\(appSide.groups) appexProfile=\(extSideGroups) "
+            + "tried=[\(tried.joined(separator: ", "))]"
+            + (roundTripFailed.isEmpty ? "" : " roundTripFail=[\(roundTripFailed.joined(separator: ", "))]")
         return nil
     }
 
