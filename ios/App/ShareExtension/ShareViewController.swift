@@ -66,6 +66,8 @@ class ShareViewController: UIViewController {
             fail("无法访问共享容器", detail: "重签后 App Group 未生效，文件没有落点。探测详情：\(SharedGroup.lastProbeDescription)。\n\n临时可用：返回分享面板，点 App 行里的「照片无损导出」图标（直投通道，不依赖 App Group）。")
             return
         }
+        // 成功也要记容器真值：主 App 看到 0 项时，靠这条区分「扩展写进了另一个容器」
+        SharedGroup.appendLog("EXT container \(SharedGroup.lastProbeDescription)")
         let items = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []
         let providers = items.compactMap(\.attachments).flatMap { $0 }
 

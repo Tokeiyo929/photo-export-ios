@@ -137,6 +137,13 @@ enum SharedGroup {
         return root.appendingPathComponent("share-queue.jsonl")
     }
 
+    /// 收件箱待登记文件数（首页「分享导入」卡片显示；容器不可用时返 0）
+    static func pendingCount() -> Int {
+        guard let inbox = inboxDirectory(),
+              let items = try? FileManager.default.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) else { return 0 }
+        return items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }.count
+    }
+
     /// 扩展侧现场日志（追加写 group 根目录 share-log.txt）：
     /// 分享扩展崩了没有任何报告渠道（连崩溃报告都难拿），把收到的提供者类型、
     /// 字节数、错误逐行落在这里；主 App 下次 drain 时转写进 ExportLog 带出设备。

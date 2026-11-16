@@ -8,7 +8,7 @@ import AVFoundation
 enum SharedIn {
 
     static func drain(documentsURL: URL, manifestURL: URL) -> Int {
-        forwardExtensionLog()
+        forwardExtensionLog(documentsURL: documentsURL)
         let fm = FileManager.default
         guard let inbox = SharedGroup.inboxDirectory(),
               let queueURL = SharedGroup.queueURL() else {
@@ -215,14 +215,19 @@ enum SharedIn {
 
     /// 扩展的现场日志转写进主日志：分享扩展崩了没有任何报告渠道，这是它把
     /// 证据带出设备的唯一通道（转写完即删，下次分享重新积累）。
-    private static func forwardExtensionLog() {
+    private static func forwardExtensionLog(documentsURL: URL) {
         guard let root = SharedGroup.container(),
               let raw = try? String(contentsOf: root.appendingPathComponent("share-log.txt"),
                                     encoding: .utf8),
               !raw.isEmpty else { return }
+        var last = ""
         for line in raw.split(separator: "\n") {
             ExportLog.write(String(line))
+            if line.contains("EXT ") { last = String(line) }
         }
+        // 扩展最后一行落 Documents（首页卡片显示）：主 App 看到 0 项时，
+        // 对比「EXT container resolved=…」就能判断是不是写了另一个容器
+        try? Data(last.utf8).write(to: documentsURL.appendingPathComponent("share-ext-last.txt"))
         try? FileManager.default.removeItem(at: root.appendingPathComponent("share-log.txt"))
     }
 }

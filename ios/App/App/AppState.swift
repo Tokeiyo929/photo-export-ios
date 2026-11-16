@@ -75,6 +75,12 @@ final class AppState: ObservableObject {
     @Published var wifiURLs: [String] = []
     /// 分享导入待登记提示（首页卡片显示）
     @Published var sharedImportedCount = 0
+    /// 首页「分享导入」卡片状态：收件箱待登记数 / 共享容器是否可用 / 探测详情 / 上次结果
+    @Published var sharePending = 0
+    @Published var shareContainerOK = true
+    @Published var shareProbe = ""
+    @Published var shareLastLine = ""
+    @Published var shareExtLine = ""
 
     /// 相册「分享→无损导出」的收件箱落位：搬进 Documents + 登记清单。
     /// 导出运行中不动文件系统（避免引擎枚举时目录在变）。
@@ -87,10 +93,28 @@ final class AppState: ObservableObject {
             // 免费 Sideloadly 不给组权限时唯一能走通的路）
             let imported = SharedIn.drain(documentsURL: documents, manifestURL: manifest)
                 + SharedIn.drainOpenInInbox(documentsURL: documents, manifestURL: manifest)
-            guard imported > 0 else { return }
+            // 卡片状态每次都刷（哪怕 0 条）：用户分享完回首页要有反馈，不能一片空白
+            let ok = SharedGroup.container() != nil
+            let pending = SharedGroup.pendingCount()
+            let probe = SharedGroup.lastProbeDescription
+            let stamp = Self.iso.string(from: Date())
+            ExportLog.write("SHARE drain imported=\(imported) pending=\(pending) containerOK=\(ok) probe=\(probe)")
             DispatchQueue.main.async {
-                self?.sharedImportedCount = imported
-                self?.loadManifest()
+                guard let self else { return }
+                self.shareContainerOK = ok
+                self.sharePending = pending
+                self.shareProbe = probe
+                self.shareExtLine = (try? String(contentsOf: documents.appendingPathComponent("share-ext-last.txt"),
+                                                 encoding: .utf8)) ?? ""
+                if imported > 0 {
+                    self.sharedImportedCount = imported
+                    self.shareLastLine = "\(stamp) 已登记 \(imported) 项"
+                    self.loadManifest()
+                    try? Data(self.shareLastLine.utf8)
+                        .write(to: documents.appendingPathComponent("share-last.txt"))
+                } else if self.shareLastLine.isEmpty {
+                    self.shareLastLine = "\(stamp) 无待登记文件"
+                }
             }
         }
     }
@@ -170,6 +194,11 @@ final class AppState: ObservableObject {
         print("PE BOOT: args=\(ProcessInfo.processInfo.arguments) debug=\(_isDebugAssertConfiguration())")
         ExportLog.write("BOOT build=\(buildLabel) args=\(ProcessInfo.processInfo.arguments.joined(separator: " "))")
         loadManifest()
+        // 上次分享导入结果（跨重启可见）：分享扩展写完回首页没反馈的投诉就靠它兜住
+        shareLastLine = (try? String(contentsOf: documentsURL.appendingPathComponent("share-last.txt"),
+                                     encoding: .utf8)) ?? ""
+        shareExtLine = (try? String(contentsOf: documentsURL.appendingPathComponent("share-ext-last.txt"),
+                                    encoding: .utf8)) ?? ""
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-autoTest") {

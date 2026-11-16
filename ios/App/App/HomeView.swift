@@ -17,6 +17,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     header
+                    shareCard
                     libraryCard
                     exportSection
                     cleanCard
@@ -27,7 +28,10 @@ struct HomeView: View {
                 .padding(16)
             }
             .navigationTitle("照片无损导出")
-            .onAppear { state.refreshLibrary() }
+            .onAppear {
+                state.refreshLibrary()
+                state.drainSharedInbox()   // 刷新「分享导入」卡片状态
+            }
             .alert("确认清理？", isPresented: $showCleanConfirm) {
                 Button("取消", role: .cancel) {}
                 Button("删除 \(state.manifestStats.okCount) 个文件", role: .destructive) {
@@ -49,6 +53,53 @@ struct HomeView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
+    }
+
+    /// 「分享导入」状态卡：分享扩展写完文件后回首页要有反馈——此前 sharedImportedCount
+    /// 只赋值不显示，用户以为没反应。容器不可用时直接写明探测详情并指路直投通道。
+    private var shareCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("分享导入", systemImage: "square.and.arrow.down.on.square")
+                .font(.headline)
+            if state.shareContainerOK {
+                Text(state.sharePending > 0
+                     ? "收件箱还有 \(state.sharePending) 项待登记（点「立即登记」或重开 App）"
+                     : "收件箱已清空")
+                    .font(.subheadline)
+                if !state.shareLastLine.isEmpty {
+                    Text(state.shareLastLine)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+                if !state.shareExtLine.isEmpty {
+                    Text("扩展侧最后一条：\(state.shareExtLine)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Button("立即登记") { state.drainSharedInbox() }
+                    .font(.footnote)
+                    .buttonStyle(.bordered)
+            } else {
+                Text("共享容器不可用（App Group 没注册上）")
+                    .font(.subheadline)
+                    .foregroundColor(.red)
+                Text(state.shareProbe)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                if !state.shareExtLine.isEmpty {
+                    Text("扩展侧最后一条：\(state.shareExtLine)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Text("替代：分享面板 App 行点「照片无损导出」直接投递")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
     }
 
     private var libraryCard: some View {
