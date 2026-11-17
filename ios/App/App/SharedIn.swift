@@ -202,6 +202,8 @@ enum SharedIn {
                                                   directory: directory, used: &used)
         let target = targetDir.appendingPathComponent(fileName)
         try fm.moveItem(at: source, to: target)
+        // 同批两张同名不同内容的文件落同一目录：used 不更新会让第二张每次都撞名失败
+        used.insert((directory + "/" + fileName).lowercased())
 
         let size = ((try? fm.attributesOfItem(atPath: target.path)[.size]) as? Int64) ?? 0
         return ManifestRow(relativePath: directory + "/" + fileName,
