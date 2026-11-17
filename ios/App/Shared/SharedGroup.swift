@@ -151,10 +151,14 @@ enum SharedGroup {
     /// 扩展侧现场日志（追加写 group 根目录 share-log.txt）：
     /// 分享扩展崩了没有任何报告渠道（连崩溃报告都难拿），把收到的提供者类型、
     /// 字节数、错误逐行落在这里；主 App 下次 drain 时转写进 ExportLog 带出设备。
+    /// 并发回调（最多 4 个在途）写同一文件：加锁防行交错截断。
+    private static let writeLock = NSLock()
+
     static func appendLog(_ message: String, root: URL? = nil) {
         guard let root = root ?? container() else { return }
         let url = root.appendingPathComponent("share-log.txt")
         let line = ISO8601DateFormatter().string(from: Date()) + " " + message + "\n"
+        writeLock.lock(); defer { writeLock.unlock() }
         if let handle = try? FileHandle(forWritingTo: url) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
@@ -173,6 +177,7 @@ enum SharedGroup {
         // 一行一个字典（不是数组）：SharedIn.drain 按行解析的约定，两处必须一致
         guard let data = try? JSONSerialization.data(withJSONObject: entry),
               let line = String(data: data, encoding: .utf8) else { return }
+        writeLock.lock(); defer { writeLock.unlock() }
         if let handle = try? FileHandle(forWritingTo: queue) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
