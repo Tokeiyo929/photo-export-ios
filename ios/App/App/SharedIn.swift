@@ -226,11 +226,18 @@ enum SharedIn {
         let fileDate = (try? fm.attributesOfItem(atPath: source.path))?[.modificationDate] as? Date
         let (directory, dateSource) = ExportPlanner.dateDirectory(creationDate: shotDate, fileDate: fileDate,
                                                                   calendar: .current)
+        // 统一挂 photos/ 前缀（迁移后的布局约定）：manifest 行、磁盘路径、used 键三处一致
+        let fullDir = "photos/" + directory
 
-        let targetDir = documentsURL.appendingPathComponent(directory, isDirectory: true)
+        let targetDir = documentsURL.appendingPathComponent(fullDir, isDirectory: true)
         try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
-        let fileName = ExportPlanner.disambiguate(fileName: source.lastPathComponent,
-                                                  directory: directory, used: &used)
+        var fileName = ExportPlanner.disambiguate(fileName: source.lastPathComponent,
+                                                  directory: fullDir, used: &used)
+        // 磁盘级防撞名：used 集合（清单+文件系统遍历）可能与磁盘有出入
+        // （重装清沙盒、清理半途、容器迁移的历史包袱），真机曾因此整批
+        // 94 个文件撞名失败。落盘前对真实文件系统再消歧一次，谁来了都能自愈。
+        (fileName, _) = diskSafeName(fileName, in: targetDir)
+        used.insert((fullDir + "/" + fileName).lowercased())
         let target = targetDir.appendingPathComponent(fileName)
         do {
             try fm.moveItem(at: source, to: target)
@@ -240,11 +247,9 @@ enum SharedIn {
             try fm.copyItem(at: source, to: target)
             try? fm.removeItem(at: source)
         }
-        // 同批两张同名不同内容的文件落同一目录：used 不更新会让第二张每次都撞名失败
-        used.insert((directory + "/" + fileName).lowercased())
 
         let size = ((try? fm.attributesOfItem(atPath: target.path)[.size]) as? Int64) ?? 0
-        return ManifestRow(relativePath: directory + "/" + fileName,
+        return ManifestRow(relativePath: fullDir + "/" + fileName,
                            size: size,
                            sha256: sha,
                            dateSource: dateSource.rawValue,
@@ -254,6 +259,26 @@ enum SharedIn {
                            status: "OK",
                            exportedAt: iso.string(from: Date()),
                            note: note.isEmpty ? fallbackNote : note + "（\(fallbackNote)）")
+    }
+
+    /// 落盘前的真实文件系统消歧：名字已被占就在扩展名前加 " (n)"（与 disambiguate 同风格）。
+    /// 返回 (最终文件名, 目标 URL)；目标保证不存在。触发时落日志留证。
+    static func diskSafeName(_ fileName: String, in dir: URL) -> (String, URL) {
+        let fm = FileManager.default
+        var target = dir.appendingPathComponent(fileName)
+        guard fm.fileExists(atPath: target.path) else { return (fileName, target) }
+        let ns = fileName as NSString
+        let base = ns.deletingPathExtension
+        let ext = ns.pathExtension
+        var candidate = fileName
+        var n = 0
+        repeat {
+            n += 1
+            candidate = ext.isEmpty ? "\(base) (\(n))" : "\(base) (\(n)).\(ext)"
+            target = dir.appendingPathComponent(candidate)
+        } while fm.fileExists(atPath: target.path)
+        ExportLog.write("IMPORT disk-collision \(fileName) → \(candidate)（used 集合漏了磁盘上的同名）")
+        return (candidate, target)
     }
 
     private static func exifDate(of url: URL) -> Date? {

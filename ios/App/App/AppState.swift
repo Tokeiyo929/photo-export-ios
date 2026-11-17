@@ -217,7 +217,9 @@ final class AppState: ObservableObject {
             }
         }
         moveAuxFilesToLogs()
-        guard !already, !movedDirs.isEmpty else { return }
+        // 不以 photos/ 是否已存在为门槛：ipa-61 期间导入过裸路径文件的用户，
+        // 根目录会重新长出 2025/ 这类目录——每次启动都要把它们收编进 photos/
+        guard !movedDirs.isEmpty else { return }
         // 清单相对路径加 photos/ 前缀（只对真的搬动成功的目录）
         let (rows, malformed) = ManifestStore.load(url: manifestURL)
         var updated: [ManifestRow] = []
