@@ -166,7 +166,8 @@ enum SharedGroup {
         let entry: [String: String] = ["file": file,
                                        "note": note ?? "",
                                        "at": ISO8601DateFormatter().string(from: Date())]
-        guard let data = try? JSONSerialization.data(withJSONObject: [entry]),
+        // 一行一个字典（不是数组）：SharedIn.drain 按行解析的约定，两处必须一致
+        guard let data = try? JSONSerialization.data(withJSONObject: entry),
               let line = String(data: data, encoding: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: queue) {
             defer { try? handle.close() }

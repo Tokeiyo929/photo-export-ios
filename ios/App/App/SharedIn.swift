@@ -19,13 +19,32 @@ enum SharedIn {
 
         // 读队列（崩溃安全：文件先落盘再记账，这行没有就当下次再收）
         guard let raw = try? String(contentsOf: queueURL, encoding: .utf8) else { return 0 }
+        // 队列行两种历史格式都收：扩展旧版写的是数组 [ {…} ]（老队列文件还在用户手机上），
+        // 新版写单个字典 {…}。之前只认字典 → 旧格式整份被跳过 → 文件永远堆在收件箱，
+        // 「立即登记」点了没反应。
         var entries: [(file: String, note: String)] = []
         for line in raw.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                  let file = obj["file"] else { continue }
+                  let parsed = try? JSONSerialization.jsonObject(with: data) else { continue }
+            var obj: [String: String]?
+            if let dict = parsed as? [String: String] {
+                obj = dict
+            } else if let array = parsed as? [[String: String]], let first = array.first {
+                obj = first
+            }
+            guard let obj, let file = obj["file"] else { continue }
             entries.append((file, obj["note"] ?? ""))
         }
+        // 收件箱里有、队列里没有的孤儿文件也要收：扩展是「先落盘再记账」，
+        // 记账那步失败/旧格式丢行时靠这里自愈，否则文件会永远堆着
+        let queued = Set(entries.map(\.file))
+        if let items = try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) {
+            for url in items where !url.hasDirectoryPath && !url.lastPathComponent.hasPrefix(".")
+                && !queued.contains(url.lastPathComponent) {
+                entries.append((url.lastPathComponent, "孤儿补收"))
+            }
+        }
+        ExportLog.write("SHARE queue lines=\(raw.split(separator: "\n").count) parsed=\(entries.count)")
         guard !entries.isEmpty else { return 0 }
 
         // 清单一次读入：重复内容守卫 + 重名去重（与挑图补漏共用同口径）
