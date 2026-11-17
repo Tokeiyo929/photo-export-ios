@@ -38,7 +38,7 @@ if [ "$1" = simctl ] && [ "$2" = launch ]; then
     timeout)
       exec /bin/sleep 60 ;;
     pass|smoke-pass)
-      for name in 01-home 02-share-import 03-manifest 04-pc-guide; do
+      for name in 01-home 02-share-import; do
         : > "$directory/now-$name"
         for _ in $(seq 1 50); do
           [ -f "$directory/ack-$name" ] && break

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """verify.py：校验一个已经拉到电脑上的导出文件夹（爱思助手/iMazing/iTunes 拉的也算）。
-逐文件重算 SHA-256 与 manifest.csv 比对，写 export-report-*.csv，全部一致退出码 0。
+逐文件重算 SHA-256 与 manifest.csv 比对，写 export-report.csv（固定名，每次覆盖），全部一致退出码 0。
 
 用法：
   python pc/verify.py D:\\相册导出

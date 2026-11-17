@@ -11,45 +11,28 @@ struct ManifestStats {
     static let empty = ManifestStats()
 }
 
-/// 「清理已拉取文件」的结果。
+/// 「清空手机端照片文件」的结果。
 struct CleanResult {
     var cleaned = 0
     var bytes: Int64 = 0
-    var absent = 0   // 文件已不在手机（此前清理过/手动删过）
+    var absent = 0   // 清单里 OK 但文件本就不在（此前清理过/手动删过）
+    var orphans = 0  // 清单外残留的照片文件（一并扫掉）
     var failed = 0   // 删除失败，保持 OK 下次再试
-}
-
-/// 校验结果（设备侧对已导出文件重算哈希）。
-struct VerifyResult {
-    var checked = 0
-    var missing: [String] = []
-    var mismatch: [String] = []
-    var finished = false
-
-    var allGood: Bool { finished && missing.isEmpty && mismatch.isEmpty }
 }
 
 /// 中心状态。约定：所有 @Published 只在主线程写（其余地方用 DispatchQueue.main.async）。
 /// 产品收缩（2026-11）：全量导出引擎与 PHPicker 补漏下线，只保留分享导入这一条入口。
 final class AppState: ObservableObject {
 
-    @Published var selectedTab = 0
-
     @Published var cleaning = false
     @Published var cleanResult: CleanResult?
 
     @Published var manifestStats = ManifestStats.empty
-    @Published var manifestRows: [ManifestRow] = []
-    @Published var verifying = false
-    @Published var verifyResult = VerifyResult()
 
-    private var wifiServer: WifiServer?
     private var autoTestScheduled = false
 
     static let iso: ISO8601DateFormatter = ISO8601DateFormatter()
 
-    @Published var wifiRunning = false
-    @Published var wifiURLs: [String] = []
     /// 首页「分享导入」卡片状态：收件箱待登记数 / 共享容器是否可用 / 探测详情 / 上次结果
     @Published var sharePending = 0
     @Published var shareContainerOK = true
@@ -88,8 +71,8 @@ final class AppState: ObservableObject {
                 self.shareProbe = probe
                 self.shareGroup = group
                 self.shareDiag = diag
-                self.shareExtLine = (try? String(contentsOf: documents.appendingPathComponent("share-ext-last.txt"),
-                                                 encoding: .utf8)) ?? ""
+                self.shareExtLine = (try? String(contentsOf: SharedIn.extLastURL(documents), encoding: .utf8)) ?? ""
+                self.refreshStorage()
                 if imported > 0 {
                     // 重复分享的旧照片会按 内容哈希+文件名 自动跳过——必须写明数量，
                     // 否则「只登记 9 个」会被理解成丢了 91 个
@@ -98,7 +81,7 @@ final class AppState: ObservableObject {
                         + (failed > 0 ? "；\(failed) 项失败（见下方诊断）" : "")
                     self.loadManifest()
                     try? Data(self.shareLastLine.utf8)
-                        .write(to: documents.appendingPathComponent("share-last.txt"))
+                        .write(to: SharedIn.lastResultURL(documents))
                 } else if failed > 0 {
                     self.shareLastLine = "\(stamp) \(failed) 项登记失败（首个错误见下方诊断）"
                 } else if skipped > 0 {
@@ -186,12 +169,15 @@ final class AppState: ObservableObject {
         setvbuf(stdout, nil, _IOLBF, 0) // 行缓冲：console 重定向到文件时也能逐行看到输出
         print("PE BOOT: args=\(ProcessInfo.processInfo.arguments) debug=\(_isDebugAssertConfiguration())")
         ExportLog.write("BOOT build=\(buildLabel) args=\(ProcessInfo.processInfo.arguments.joined(separator: " "))")
+        migrateDocumentLayout()
         loadManifest()
         // 上次分享导入结果（跨重启可见）：分享扩展写完回首页没反馈的投诉就靠它兜住
-        shareLastLine = (try? String(contentsOf: documentsURL.appendingPathComponent("share-last.txt"),
-                                     encoding: .utf8)) ?? ""
-        shareExtLine = (try? String(contentsOf: documentsURL.appendingPathComponent("share-ext-last.txt"),
-                                    encoding: .utf8)) ?? ""
+        let logs = SharedIn.logsDirectory(documentsURL)
+        let legacyRoot = { (name: String) in self.documentsURL.appendingPathComponent(name) }
+        shareLastLine = (try? String(contentsOf: SharedIn.lastResultURL(documentsURL), encoding: .utf8))
+            ?? (try? String(contentsOf: legacyRoot("share-last.txt"), encoding: .utf8)) ?? ""
+        shareExtLine = (try? String(contentsOf: SharedIn.extLastURL(documentsURL), encoding: .utf8))
+            ?? (try? String(contentsOf: legacyRoot("share-ext-last.txt"), encoding: .utf8)) ?? ""
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-autoTest") {
@@ -205,31 +191,109 @@ final class AppState: ObservableObject {
         ExportLog.write("GROUP \(SharedGroup.lastProbeDescription)")
     }
 
-    // MARK: - WiFi 直传
+    // MARK: - 目录布局（干净根目录：manifest.csv + photos/ + logs/ + Inbox/）
 
-    /// 局域网 HTTP 直传：iOS 27 的数据线 AFC 通道对本 App 服务了错误的容器视图
-    /// （按名读永远 OBJECT_NOT_FOUND），WiFi 是可用的拉取通道（LocalSend 同款模式）。
-    func startWifiServer() {
-        guard !wifiRunning else { return }
-        let server = WifiServer(documentsURL: documentsURL, port: 8765)
-        server.start()
-        wifiServer = server
-        wifiRunning = true
-        wifiURLs = server.localURLs
-        ExportLog.write("WIFI start urls=\(server.localURLs.joined(separator: " "))")
+    /// 一次性迁移：老版本把照片年份目录和 share-*/export-log* 散在 Documents 根。
+    /// 迁移后根目录只剩 manifest.csv（PC 接口）、photos/（照片）、logs/（内部文件）、Inbox/（系统直投）。
+    /// 同步执行：都是 rename 级操作；迁移完才 loadManifest，避免并发读写清单。
+    private func migrateDocumentLayout() {
+        let fm = FileManager.default
+        let root = documentsURL
+        let photos = root.appendingPathComponent("photos", isDirectory: true)
+        let already = fm.fileExists(atPath: photos.path)
+        if !already {
+            try? fm.createDirectory(at: photos, withIntermediateDirectories: true)
+        }
+        var movedDirs: Set<String> = []
+        if let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+            for url in items {
+                let name = url.lastPathComponent
+                if name == "Inbox" || name == "photos" || name == "logs" { continue }
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
+                // 照片归档目录（年份/UNDATED）整体挪进 photos/
+                guard (try? fm.moveItem(at: url, to: photos.appendingPathComponent(name))) != nil else { continue }
+                movedDirs.insert(name)
+            }
+        }
+        moveAuxFilesToLogs()
+        guard !already, !movedDirs.isEmpty else { return }
+        // 清单相对路径加 photos/ 前缀（只对真的搬动成功的目录）
+        let (rows, malformed) = ManifestStore.load(url: manifestURL)
+        var updated: [ManifestRow] = []
+        var changed = false
+        for var row in rows {
+            let first = row.relativePath.split(separator: "/").first.map(String.init) ?? ""
+            if movedDirs.contains(first), !row.relativePath.hasPrefix("photos/") {
+                row.relativePath = "photos/" + row.relativePath
+                changed = true
+            }
+            updated.append(row)
+        }
+        if changed {
+            try? ManifestStore.writeAll(url: manifestURL, rows: updated)
+        }
+        ExportLog.write("MIGRATE layout dirs=[\(movedDirs.sorted().joined(separator: ","))] rows=\(updated.count) malformed=\(malformed) rewritten=\(changed)")
     }
 
-    func stopWifiServer() {
-        wifiServer?.stop()
-        wifiServer = nil
-        wifiRunning = false
-        wifiURLs = []
+    /// 根目录散落的内部文件（share-*/export-log*）归 logs/
+    private func moveAuxFilesToLogs() {
+        let fm = FileManager.default
+        let logs = SharedIn.logsDirectory(documentsURL)
+        guard let items = try? fm.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: nil) else { return }
+        for url in items {
+            let name = url.lastPathComponent
+            let isAux = name.hasPrefix("share-") || name.hasPrefix("export-log")
+            guard isAux, !url.hasDirectoryPath else { continue }
+            try? fm.moveItem(at: url, to: logs.appendingPathComponent(name))
+        }
+    }
+
+    // MARK: - 手机上占用了多少
+
+    struct StorageScan {
+        var photos = 0
+        var bytes: Int64 = 0
+        var scanned = false
+    }
+
+    @Published var storageScan = StorageScan()
+    @Published var scanningStorage = false
+
+    /// 实测 Documents 里的照片数与字节（不含 manifest/logs 这些内部小文件）——
+    /// 「清理干净没有」不用猜：照片 0 个 = 干净；比待拉取数多 = 有已拉取未清或残留。
+    func refreshStorage() {
+        guard !scanningStorage else { return }
+        scanningStorage = true
+        let root = documentsURL
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var scan = StorageScan()
+            let fm = FileManager.default
+            let logsPrefix = SharedIn.logsDirectory(root).path + "/"
+            if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
+                for case let url as URL in walker {
+                    let path = url.path
+                    if path.hasPrefix(logsPrefix) || path == root.appendingPathComponent("manifest.csv").path { continue }
+                    guard let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                          vals.isRegularFile == true else { continue }
+                    scan.photos += 1
+                    scan.bytes += Int64(vals.fileSize ?? 0)
+                }
+            }
+            scan.scanned = true
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scanningStorage = false
+                self.storageScan = scan
+            }
+        }
     }
 
     // MARK: - 清理已拉取
 
-    /// 大库分批工作流的关键一步：确认电脑端已拉取并校验 PASS 后，
-    /// 删掉手机端已导出文件腾空间；清单改记 PULLED（哈希保留，证明链不断）。
+    /// 确认电脑端已拉取并校验 PASS 后，删掉手机端全部照片文件腾空间：
+    /// 清单里 OK 的行改记 PULLED（哈希保留，证明链不断），清单外的残留一并扫掉——
+    /// 「清理干净没有」从此不用猜，看占用卡的照片数归零即可。
     func cleanExportedFiles() {
         guard !cleaning else { return }
         cleaning = true
@@ -262,6 +326,19 @@ final class AppState: ObservableObject {
                 pulled.exportedAt = ManifestStore.now()
                 pulledRows.append(pulled)
             }
+            // 扫尾：photos/ 里清单外的残留照片也一并清掉（含已拉取未清的）
+            let photosRoot = root.appendingPathComponent("photos", isDirectory: true)
+            if let walker = fm.enumerator(at: photosRoot, includingPropertiesForKeys: nil) {
+                for case let url as URL in walker where !url.hasDirectoryPath {
+                    let size = ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize).map(Int64.init) ?? 0
+                    guard (try? fm.removeItem(at: url)) != nil else {
+                        result.failed += 1
+                        continue
+                    }
+                    result.orphans += 1
+                    result.bytes += size
+                }
+            }
             if !pulledRows.isEmpty {
                 do { try ManifestStore.append(url: manifestURL, rows: pulledRows) } catch { /* 下次重试 */ }
             }
@@ -272,6 +349,7 @@ final class AppState: ObservableObject {
                 self.cleaning = false
                 self.cleanResult = result
                 self.loadManifest()
+                self.refreshStorage()
             }
         }
     }
@@ -294,43 +372,6 @@ final class AppState: ObservableObject {
             }
         }
         manifestStats = stats
-        manifestRows = Array(rows.suffix(300).reversed())
-    }
-
-    /// 设备侧复核：对清单里所有 OK 的文件重算哈希（与 PC 端校验互为印证）。
-    func verifyExported() {
-        guard !verifying else { return }
-        verifying = true
-        verifyResult = VerifyResult()
-        let root = documentsURL
-        let manifestURL = self.manifestURL
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let (rows, _) = ManifestStore.load(url: manifestURL)
-            let dict = ManifestStore.rowDictionary(of: rows)
-            var result = VerifyResult()
-            for (path, row) in dict where row.status == "OK" {
-                let url = root.appendingPathComponent(path)
-                guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                      (attrs[.size] as? Int64) == row.size,
-                      let hash = try? FileHasher.sha256(of: url) else {
-                    result.missing.append(path)
-                    continue
-                }
-                if hash == row.sha256 {
-                    result.checked += 1
-                } else {
-                    result.mismatch.append(path)
-                }
-            }
-            result.finished = true
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.verifying = false
-                self.verifyResult = result
-                print("PE VERIFY: checked=\(result.checked) missing=\(result.missing.count) mismatch=\(result.mismatch.count)")
-                ExportLog.write("VERIFY checked=\(result.checked) missing=\(result.missing.count) mismatch=\(result.mismatch.count)")
-            }
-        }
     }
 
     // MARK: - 测试钩子（仅 DEBUG）

@@ -7,6 +7,21 @@ import AVFoundation
 /// pull.py 拉取校验/清理与扫描导出的文件完全同权（PC 端零改动）。
 enum SharedIn {
 
+    /// 内部状态文件统一归 Documents/logs/：Documents 根只留 manifest.csv、photos/、logs/、Inbox/
+    static func logsDirectory(_ documentsURL: URL) -> URL {
+        let dir = documentsURL.appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static func extLastURL(_ documentsURL: URL) -> URL {
+        logsDirectory(documentsURL).appendingPathComponent("share-ext-last.txt")
+    }
+
+    static func lastResultURL(_ documentsURL: URL) -> URL {
+        logsDirectory(documentsURL).appendingPathComponent("share-last.txt")
+    }
+
     /// 最近一次 drain 的现场摘要（首页卡片直接显示）：0 项时能一眼看出是
     /// 「扩展没写进同一容器」「队列解析不出」「搬不动」中的哪一种。
     static private(set) var lastDiagnostics = ""
@@ -115,7 +130,9 @@ enum SharedIn {
             }
         }
         ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed) leftover=\(leftovers.count) firstErr=\(firstError) manifestErr=\(manifestError)")
+        let liveImported = pending.filter { $0.note.contains("Live 原图对") }.count
         lastDiagnostics = "组 \(SharedGroup.resolvedGroupName)：队列 \(rawLines) 行/解析 \(parsedCount)，收件箱 \(inboxFiles.count) 个文件 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
+            + (liveImported > 0 ? "；其中 Live 图 \(liveImported) 个文件（每张 Live=原图+视频一对，登记数是照片数的两倍）" : "")
             + (firstError.isEmpty ? "" : "；首个错误 \(firstError)")
             + (manifestError.isEmpty ? "" : "；\(manifestError)")
         // 重写队列 = 只剩没搬成的（文件不在的自动销账）
@@ -287,7 +304,7 @@ enum SharedIn {
         }
         // 扩展最后一行落 Documents（首页卡片显示）：主 App 看到 0 项时，
         // 对比「EXT container resolved=…」就能判断是不是写了另一个容器
-        try? Data(last.utf8).write(to: documentsURL.appendingPathComponent("share-ext-last.txt"))
+        try? Data(last.utf8).write(to: extLastURL(documentsURL))
         try? FileManager.default.removeItem(at: root.appendingPathComponent("share-log.txt"))
     }
 }

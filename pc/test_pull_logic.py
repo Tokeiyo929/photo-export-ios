@@ -259,9 +259,9 @@ class WifiPullTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         for rel, data in payloads.items():
             self.assertEqual((dest / rel).read_bytes(), data)
-        reports = sorted(dest.glob("export-report-*.csv"))
-        self.assertTrue(reports, "报告未生成")
-        with open(reports[-1], encoding="utf-8-sig") as handle:
+        report = dest / "export-report.csv"
+        self.assertTrue(report.exists(), "报告未生成")
+        with open(report, encoding="utf-8-sig") as handle:
             statuses = [r["result"] for r in csv.DictReader(handle)]
         self.assertEqual(statuses.count("PASS"), 2)
 
@@ -300,9 +300,9 @@ class WifiPullTest(unittest.TestCase):
                                             + "".join(r + "\n" for r in rows).encode("utf-8"))
         rc = self._run_wifi(root, dest)
         self.assertEqual(rc, 1)
-        reports = sorted(dest.glob("export-report-*.csv"))
-        self.assertTrue(reports, "报告未生成")
-        with open(reports[-1], encoding="utf-8-sig") as handle:
+        report = dest / "export-report.csv"
+        self.assertTrue(report.exists(), "报告未生成")
+        with open(report, encoding="utf-8-sig") as handle:
             statuses = [r["result"] for r in csv.DictReader(handle)]
         self.assertEqual(statuses, ["FAIL"])
 

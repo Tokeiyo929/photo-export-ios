@@ -11,8 +11,7 @@ import UIKit
 /// drainSharedInbox 登记。这样 CI 验的正是产品主链路：收件箱→哈希→归档→清单。
 final class SmokeTour {
     static let shared = SmokeTour()
-    static let pages = ["01-home", "02-share-import", "03-manifest", "04-pc-guide"]
-    static let pageTabs = [0, 0, 1, 2]
+    static let pages = ["01-home", "02-share-import"]
 
     private weak var state: AppState?
     private var smokeDir: URL {
@@ -40,18 +39,12 @@ final class SmokeTour {
             return
         }
         let name = Self.pages[index]
-        state.selectedTab = Self.pageTabs[index]
         print("PE SMOKE: page \(name)")
         switch name {
         case "01-home":
             delay(0.8) { [weak self] in self?.showMarker(index) } // 等首页卡片渲染完再截
-        case "02-share-import":
+        default: // 02-share-import
             importShareFixtures(index: index)
-        case "03-manifest":
-            state.loadManifest()
-            delay(0.8) { [weak self] in self?.showMarker(index) }
-        default: // 04-pc-guide
-            delay(0.8) { [weak self] in self?.showMarker(index) }
         }
     }
 

@@ -80,7 +80,6 @@ targets:
             LSItemContentTypes:
               - public.image
               - public.movie
-        NSLocalNetworkUsageDescription: 用于在家庭 WiFi 里把已导出的照片直接传到电脑（电脑运行 pull.py --wifi 或浏览器打开显示的地址）。仅限同一局域网，勿在公共 WiFi 开启。
 
   # 无人值守 CI 授权：iOS 26 模拟器上宿主侧预授权（simctl privacy / TCC.db）对 readWrite 无效，
   # 只有权限弹窗能落授权；用 XCUITest interruption monitor 替人点"允许"。

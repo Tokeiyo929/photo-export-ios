@@ -1,6 +1,7 @@
 import UIKit
 import UniformTypeIdentifiers
 import ObjectiveC
+import Photos
 
 /// 相册分享入口：用户在相册选图 → 分享 → 「无损导出」。
 /// 模式对齐 Nextcloud iOS 的 NCFilesExtensionHandler（千万级用户的生产实现）：
@@ -17,6 +18,9 @@ class ShareViewController: UIViewController {
     /// 同时向系统要文件的并发数：257 个一起要会被系统节流/超时，
     /// 4 个刚好贴合 iCloud 原片下载的并发度
     private static let maxConcurrent = 4
+    /// Live 图写盘专用串行队列：sem.wait 绝不占系统 provider 回调线程（防同队列死锁），
+    /// 串行也顺带把 PHLivePhoto 解码的内存峰值压到单张（扩展 120MB 上限）
+    private static let liveQueue = DispatchQueue(label: "ext.livephoto")
 
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .large)
@@ -24,6 +28,8 @@ class ShareViewController: UIViewController {
     private var fellBack = 0
     private var total = 0
     private var completed = 0
+    /// 实际落盘的文件数（Live 图一项=图+视频两个文件，与 completed 口径不同）
+    private var filesReceived = 0
     /// 只在主线程读写；收尾后到达的回调弃单
     private var finished = false
     /// open 回调是否已处理（成功/失败/超时只收尾一次）
@@ -147,7 +153,32 @@ class ShareViewController: UIViewController {
     }
 
     private func load(_ provider: NSItemProvider, identifier: String) {
-        SharedGroup.appendLog("EXT load \(identifier)")
+        SharedGroup.appendLog("EXT provider utis=[\(provider.registeredTypeIdentifiers.joined(separator: ","))] name=\(provider.suggestedName ?? "-")")
+        // Live 图优先走 PHLivePhoto → PHAssetResource 原始资源对（.photo + .pairedVideo）：
+        // loadFileRepresentation 拿到的多半是转码后的 JPEG，Live 的视频半边系统根本不给——
+        // 这两条是「分享 100 张到 App 变 68 个 JPEG」的两条根。模式同 Proton Drive
+        // NSItemProviderLivePhotoUseCase / Nextcloud iOS getMediaAssets。
+        if provider.canLoadObject(ofClass: PHLivePhoto.self) {
+            SharedGroup.appendLog("EXT livephoto try")
+            provider.loadObject(ofClass: PHLivePhoto.self) { [weak self] object, error in
+                guard let self else { return }
+                // 立刻跳到自家队列再等 writeData 回调，不占系统回调线程
+                Self.liveQueue.async {
+                    if let live = object as? PHLivePhoto {
+                        let ok = self.writeLivePhotoResources(live, into: self.inboxURL)
+                        DispatchQueue.main.async { self.providerDone(success: ok) }
+                    } else {
+                        SharedGroup.appendLog("EXT livephoto FAIL \(error.map { "\($0)" } ?? "?") → 文件通道")
+                        self.loadFile(provider, identifier: identifier)
+                    }
+                }
+            }
+            return
+        }
+        loadFile(provider, identifier: identifier)
+    }
+
+    private func loadFile(_ provider: NSItemProvider, identifier: String) {
         // 首选：系统暂存文件（原片字节+原名，零解码零内存峰值）
         provider.loadFileRepresentation(forTypeIdentifier: identifier) { [weak self] url, error in
             guard let self else { return }
@@ -194,10 +225,10 @@ class ShareViewController: UIViewController {
         inFlight -= 1
         completed += 1
         if success { received += 1 } else { fellBack += 1 }
-        setStatus("已接收 \(received + fellBack)/\(total)…请保持屏幕亮着")
+        setStatus("已收 \(filesReceived) 个文件（完成 \(completed)/\(total) 项）…请保持屏幕亮着")
         if completed % 20 == 0 || completed == total {
             let elapsed = Date().timeIntervalSince(startedAt)
-            SharedGroup.appendLog(String(format: "EXT progress %d/%d %.1fs", completed, total, elapsed))
+            SharedGroup.appendLog(String(format: "EXT progress %d/%d files=%d %.1fs", completed, total, filesReceived, elapsed))
         }
         pump()
     }
@@ -209,13 +240,64 @@ class ShareViewController: UIViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
             guard let self, !self.finished, self.completed < self.total else { return }
             SharedGroup.appendLog("EXT slow \(self.completed)/\(self.total) after \(seconds)s")
-            self.setStatus("已接收 \(self.received + self.fellBack)/\(self.total)…\n交接较慢，息屏会暂停，请保持屏幕亮着")
+            self.setStatus("已收 \(self.filesReceived) 个文件（完成 \(self.completed)/\(self.total) 项）…\n交接较慢，息屏会暂停，请保持屏幕亮着")
         }
+    }
+
+    /// Live 图原片对：PHAssetResource.assetResources(for:) 拿 .photo（原图 HEIC/JPEG）
+    /// 和 .pairedVideo（Live 视频 MOV）两个资源，writeData 逐个把**原始字节**流式写进收件箱。
+    /// writeData 不解码不涨内存（扩展 120MB 上限安全），isNetworkAccessAllowed=true
+    /// 让 iCloud 原片自动下载。originalFilename 就是 IMG_xxxx.HEIC/.MOV 原名。
+    private func writeLivePhotoResources(_ live: PHLivePhoto, into inbox: URL?) -> Bool {
+        guard let inbox else { return false }
+        let resources = PHAssetResource.assetResources(for: live)
+        let wanted = resources.filter { $0.type == .photo || $0.type == .pairedVideo }
+        SharedGroup.appendLog("EXT livephoto resources=\(resources.map { "\($0.type.rawValue)" }.joined(separator: ",")) wanted=\(wanted.count)")
+        var okAny = false
+        for resource in wanted {
+            let name = resource.originalFilename.isEmpty
+                ? (resource.type == .pairedVideo ? "live-\(Int(Date().timeIntervalSince1970)).mov" : "live-\(Int(Date().timeIntervalSince1970)).heic")
+                : resource.originalFilename
+            let target = disambiguatedTarget(name, in: inbox)
+            let options = PHAssetResourceRequestOptions()
+            options.isNetworkAccessAllowed = true
+            var writeError: Error?
+            let sem = DispatchSemaphore(value: 0)
+            PHAssetResourceManager.default().writeData(for: resource, toFile: target, options: options) { error in
+                writeError = error
+                sem.signal()
+            }
+            sem.wait()
+            if let writeError {
+                SharedGroup.appendLog("EXT live write ERR \(name): \(writeError)")
+                try? FileManager.default.removeItem(at: target)
+                continue
+            }
+            let size = ((try? FileManager.default.attributesOfItem(atPath: target.path)[.size]) as? Int64) ?? 0
+            SharedGroup.enqueue(file: target.lastPathComponent, note: "Live 原图对")
+            SharedGroup.appendLog(String(format: "EXT live copy %@ type=%d %lld bytes", target.lastPathComponent, resource.type.rawValue, size))
+            DispatchQueue.main.async { self.filesReceived += 1 }
+            okAny = true
+        }
+        return okAny
+    }
+
+    /// 收件箱内防顶名：同名加 -2/-3 序号（copyFile/writeData 共用）
+    private func disambiguatedTarget(_ name: String, in inbox: URL) -> URL {
+        let fm = FileManager.default
+        var target = inbox.appendingPathComponent(name)
+        var n = 1
+        while fm.fileExists(atPath: target.path) {
+            n += 1
+            let base = (name as NSString).deletingPathExtension
+            let ext = (name as NSString).pathExtension
+            target = inbox.appendingPathComponent("\(base)-\(n).\(ext)")
+        }
+        return target
     }
 
     /// 字节级复制（Nextcloud 同款 copyItem）：文件名冲突加序号
     private func copyFile(_ source: URL, provider: NSItemProvider, into inbox: URL) -> Bool {
-        let fm = FileManager.default
         // 暂存文件名通常就是 IMG_xxxx.HEIC；没扩展名时用 suggestedName 补
         var name = source.lastPathComponent
         if (name as NSString).pathExtension.isEmpty,
@@ -225,19 +307,13 @@ class ShareViewController: UIViewController {
                 : source.pathExtension
             name = "\(suggested).\(ext)"
         }
-        var target = inbox.appendingPathComponent(name)
-        var n = 1
-        while fm.fileExists(atPath: target.path) {
-            n += 1
-            let base = (name as NSString).deletingPathExtension
-            let ext = (name as NSString).pathExtension
-            target = inbox.appendingPathComponent("\(base)-\(n).\(ext)")
-        }
+        let target = disambiguatedTarget(name, in: inbox)
         do {
-            try fm.copyItem(at: source, to: target)
-            let size = ((try? fm.attributesOfItem(atPath: target.path)[.size]) as? Int64) ?? 0
+            try FileManager.default.copyItem(at: source, to: target)
+            let size = ((try? FileManager.default.attributesOfItem(atPath: target.path)[.size]) as? Int64) ?? 0
             SharedGroup.enqueue(file: target.lastPathComponent, note: nil)
             SharedGroup.appendLog(String(format: "EXT copy %@ %lld bytes", target.lastPathComponent, size))
+            DispatchQueue.main.async { self.filesReceived += 1 }
             return true
         } catch {
             SharedGroup.appendLog("EXT copy ERR \(name): \(error)")
@@ -258,6 +334,7 @@ class ShareViewController: UIViewController {
             try data.write(to: target, options: [.atomic])
             SharedGroup.enqueue(file: target.lastPathComponent, note: note)
             SharedGroup.appendLog(String(format: "EXT write %@ %d bytes", target.lastPathComponent, data.count))
+            DispatchQueue.main.async { self.filesReceived += 1 }
             return true
         } catch {
             SharedGroup.appendLog("EXT write ERR \(suggested): \(error)")
@@ -270,19 +347,24 @@ class ShareViewController: UIViewController {
     private func finish() {
         guard !finished else { return }
         finished = true
-        SharedGroup.appendLog("EXT done received=\(received) fellBack=\(fellBack)")
+        SharedGroup.appendLog("EXT done items=\(completed)/\(total) files=\(filesReceived) fellBack=\(fellBack)")
         spinner.stopAnimating()
-        setStatus("已接收 \(received + fellBack)/\(total)")
-        if received > 0 {
+        setStatus("已收 \(filesReceived) 个文件（完成 \(completed)/\(total) 项）")
+        if filesReceived > 0 {
             // 分享完直接拉起主 App：extensionContext.open 在分享扩展上不是官方保证
             // （Apple 论坛 27295：Share Extension 不允许 open URL），先尽力试——
             // 成功用户直接进 App 自动登记；被系统拒了才退回弹窗指路。
             openHostApp(fallback: { [weak self] in
                 guard let self else { return }
                 let container = SharedGroup.resolvedGroupName.isEmpty ? "未定位" : SharedGroup.resolvedGroupName
+                // 缺数如实写明：completed < total = 系统根本没把选中的项交出来（进程被杀/被取消），
+                // 不是 App 丢弃——这条提示是「分享 100 只到 68」取证的抓手
+                var notes: [String] = []
+                if self.fellBack > 0 { notes.append("其中 \(self.fellBack) 项降级处理（详见主 App 记录）") }
+                if self.completed < self.total { notes.append("系统只交出 \(self.completed)/\(self.total) 项，缺的 \(self.total - self.completed) 项没到手——屏幕别熄再分享一次试试") }
                 let alert = UIAlertController(
-                    title: "已接收 \(self.received) 个文件",
-                    message: (self.fellBack > 0 ? "其中 \(self.fellBack) 个走了降级通道（详见主 App 记录）。" : "")
+                    title: "已收 \(self.filesReceived) 个文件",
+                    message: (notes.isEmpty ? "" : notes.joined(separator: "；") + "。\n\n")
                         + "原片字节已保存（容器 \(container)），回桌面打开主 App 完成登记。\n\n"
                         + "想一步到位：下次分享时点 App 行里的「照片无损导出」图标（直投通道，系统会直接打开 App）。",
                     preferredStyle: .alert)

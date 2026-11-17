@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """pull.py：数据线（usbmuxd/AFC/house_arrest）从 App 沙盒 Documents 拉取原片到电脑，
-并逐文件用 SHA-256 与 manifest.csv 比对，出 export-report.csv；--zip 顺带打仅存储包。
+并逐文件用 SHA-256 与 manifest.csv 比对，出 export-report.csv（固定名，每次覆盖）；--zip 顺带打仅存储包。
 
 依赖：
   pip install pymobiledevice3
@@ -233,8 +233,9 @@ def wifi_pull(args: argparse.Namespace) -> int:
     pe_common.log(f"清单：待拉取 {len(expected)} 个文件{pulled_note}"
                   + (f"，损坏行 {malformed}" if malformed else ""))
 
-    # 2) 诊断日志顺带拉回（不参与校验）
-    for diag in ("export-log.txt", "export-log.old.txt"):
+    # 2) 诊断日志顺带拉回（不参与校验）：App 收缩后日志归 logs/，兼容旧版根目录
+    for diag in ("logs/export-log.txt", "logs/export-log.old.txt",
+                 "export-log.txt", "export-log.old.txt"):
         try:
             data = _http_get(base + "/" + diag)
         except Exception:
@@ -409,7 +410,9 @@ async def amain(args: argparse.Namespace) -> int:
 
     # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里。
     # 必须在 manifest 之后处理 vend 兜底，但日志读取仍尽量早：首跑无清单也拿得到日志。
-    diagnostics = {"export-log.txt", "export-log.old.txt"}
+    # App 收缩后日志归 logs/，兼容旧版根目录
+    diagnostics = {"logs/export-log.txt", "logs/export-log.old.txt",
+                   "export-log.txt", "export-log.old.txt"}
     for diag in sorted(diagnostics):
         try:
             data = await house.get_file_contents(rooted(diag))

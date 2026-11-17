@@ -15,8 +15,11 @@ enum ExportLog {
     }()
 
     static var logURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("export-log.txt")
+        // 内部文件统一归 Documents/logs/：根目录只留 manifest.csv、photos/、logs/、Inbox/
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let logs = docs.appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        return logs.appendingPathComponent("export-log.txt")
     }
 
     /// 线程安全；写失败静默（日志不能反过来影响导出）。

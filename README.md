@@ -1,6 +1,6 @@
 # 照片无损导出（Photo Export）
 
-把 iPhone 相册**零质量损失**搬到电脑的专用工具：在相册里选中照片 → 分享给本 App → 原片字节按拍摄日期归档进沙盒 → 数据线/WiFi 拉到电脑逐文件哈希验证。产品收缩（2026-11）后只保留这一条入口：**分享导出**。
+把 iPhone 相册**零质量损失**搬到电脑的专用工具：在相册里选中照片 → 分享给本 App → 原片字节按拍摄日期归档进沙盒 → 数据线拉到电脑逐文件哈希验证。产品收缩（2026-11）后只保留这一条入口：**分享导出**。
 
 ## 它解决什么问题
 
@@ -15,25 +15,24 @@
 
 本工具的原则：**只做字节级复制，禁止一切格式转换和重新编码**；每个文件复制前后各算一次 SHA-256，哈希一致才算成功——用数学代替「看起来没问题」。
 
-## 功能（分享 / 记录 / 电脑）
+## 功能（单页 App：分享导入）
 
 - **分享导出**：在相册里选中照片 → 分享 → **「无损导出」**→ 文件按拍摄时间归档进 Documents 并登记清单（哈希证明链，PC 端拉取校验同权）。模式对齐 Nextcloud/LocalSend 的分享扩展：系统递文件字节级复制（原名保留），只拿不到文件时才降级并在记录里如实标注。同一张照片重复分享会按「内容哈希+文件名」自动跳过，卡片会写明「已登记 X · 另有 Y 项之前已登记过」。
-  - 另有一条**直投通道**：分享面板的 App 行点 **「照片无损导出」**图标，系统把原文件拷进 `Documents/Inbox` 再拉起 App——这条路不依赖 App Group，任何签名方式都通（记录里来源标「分享直投」）。
-  - 分享扩展依赖 App Group；免费 Apple ID 重签时组权限经常注册不上（Sideloadly 免费版不给 Custom Entitlements）。**兜底通道**：分享面板的 App 行点 **「照片无损导出」**图标，系统把原文件拷进 `Documents/Inbox` 再拉起 App——这条路不依赖 App Group，任何签名方式都通（记录里来源标「分享直投」）。
+  - **直投兜底通道**：分享面板的 App 行点 **「照片无损导出」**图标，系统把原文件拷进 `Documents/Inbox` 再拉起 App——这条路不依赖 App Group，任何签名方式都通（来源标「分享直投」）。分享扩展依赖 App Group，免费 Apple ID 重签时组权限经常注册不上（Sideloadly 免费版不给 Custom Entitlements），走这条即可。
   - **分享完能否直接跳回 App**：分享扩展主动拉起宿主 App 不是 Apple 保证的能力（论坛 27295）。本版登记完会先用 `photoexport://shared` **尽力尝试拉起**，系统放行就直接进 App 自动登记；被拒才弹窗提示手动打开。真想一步到位，走上面的 App 行直投通道最稳。
   - **导入没反应怎么查**：首页「分享导入」卡片现在直接显示主 App 落到的组名、队列行数/解析条数、收件箱文件数、登记/跳过/失败数和首个错误——拍一张卡片的图就能定位是「扩展写进了另一个容器」还是「文件搬不动」。
-  - **一次分享几百张**：扩展同时只向系统要 4 个文件（257 个一起要会被系统节流），逐件落盘记账；扩展会尽力关掉自动锁屏（结果写 `EXT idle-timer` 日志），但扩展进程不保证有 UIApplication 权限——**息屏后系统会挂起扩展、交接暂停**，所以大批量时请保持亮屏（或把「自动锁定」调长）。旧版 90 秒超时会把迟到的文件全丢掉（257 张只登记 145 张的根因），现在超时只提示、不弃单，解锁后继续收完。
-- **记录**：manifest.csv 统计与最近记录（OK 待拉取 / PULLED 已拉取清理 / FAIL 三种状态）；「复核全部文件哈希」在设备上重算一遍已导出文件的 SHA-256。
-- **电脑**：数据线拉取的操作指引。
+  - **一次分享几百张**：扩展同时只向系统要 4 个文件（257 个一起要会被系统节流），逐件落盘记账；扩展会尽力关掉自动锁屏（结果写 `EXT idle-timer` 日志），但扩展进程不保证有 UIApplication 权限——**息屏后系统会挂起扩展、交接暂停**，所以大批量时请保持亮屏（或把「自动锁定」调长）。旧版 90 秒超时会把迟到的文件全丢掉（257 张只登记 145 张的根因），现在超时只提示、不弃单，解锁后继续收完。收尾弹窗如实报数：若系统只交出了选中项的一部分（进程被杀/被取消），会写明「缺的 N 项没到手」。
+  - **Live 图（实况）**：走 `PHLivePhoto → PHAssetResource` 原始资源对（Proton Drive/Nextcloud 同款）——每张 Live 登记**两个文件**：`IMG_xxxx.HEIC` 原图 + `IMG_xxxx.MOV` Live 视频，都是原始字节（iCloud 原片自动下载）。所以「分享 100 张 Live」清单里是 200 行，卡片会写明。普通照片仍走文件通道字节级复制。
+- **清理已拉取**：电脑端校验全 PASS 后一键删手机端文件腾空间，清单改记 PULLED（哈希保留，证明链不断）。
 
-**无损边界**：登记的是系统从相册递出的**原片字节**（分享扩展按 Nextcloud 同款 `copyItem` 字节级复制，不碰 `PHImageManager` 的渲染图；只在系统只给位图的极罕见情况下降级并在 note 如实标注重编码）。归档目录按拍摄时间：图片读 EXIF、视频读 QuickTime creationDate，都没有则退文件时间。
+**无损边界**：登记的是系统从相册递出的**原片字节**（分享扩展按 Nextcloud 同款 `copyItem` 字节级复制，不碰 `PHImageManager` 的渲染图；只在系统只给位图的极罕见情况下降级并在 note 如实标注重编码）。Live 图取 `.photo`/`.pairedVideo` 资源的原始字节。归档目录按拍摄时间：图片读 EXIF、视频读 QuickTime creationDate，都没有则退文件时间。
 
 ## 可证明的无损链路
 
 ```
 设备内：分享扩展 copyItem 原始字节 → App Group 收件箱落盘 → 主 App 登记时算 SHA-256
         → 按拍摄日期归档进 Documents → manifest.csv 记 OK 行（搬不动 = 留在收件箱下轮再试）
-数据线：pull.py 拉取 → 逐文件重算 SHA-256 对照 manifest → export-report-*.csv
+数据线：pull.py 拉取 → 逐文件重算 SHA-256 对照 manifest → export-report.csv（固定名，每次覆盖）
         └─ 全 PASS 退出码 0；任何 FAIL/MISSING 退出码 1
 ```
 
@@ -63,17 +62,17 @@ relative_path,size,sha256,date_source,asset_id,media_type,favorite,status,export
 
 ## PC 端：拉取路径
 
-App 已开启 iTunes 文件共享（`UIFileSharingEnabled`），原片都在沙盒 `Documents/` 下。
-懒得记命令就双击仓库根目录的 **拉取.bat**（菜单选数据线或 WiFi，参数可通过命令行尾追加，如 `拉取.bat --zip`）。
+App 已开启 iTunes 文件共享（`UIFileSharingEnabled`）。目录布局（2026-11 收缩后）：Documents 根只有 `manifest.csv` + `photos/`（照片按日期归档）+ `logs/`（内部日志）+ `Inbox/`（系统直投暂存）。
+懒得记命令就双击仓库根目录的 **拉取.bat**（菜单选数据线或原图对照，参数可通过命令行尾追加，如 `拉取.bat --zip`）。
 
 ### 方式 A：数据线脚本（推荐）
 
-> iOS 27 真机注意：重签名 App 的 house_arrest/AFC 通道可能服务错误的容器视图——症状是「目录都列得出来，按名读永远 OBJECT_NOT_FOUND」。这是生态级问题（libimobiledevice#1490），此时换 **方式 D：WiFi 直传**。
+> iOS 27 真机注意：重签名 App 的 house_arrest/AFC 通道可能服务错误的容器视图——症状是「目录都列得出来，按名读永远 OBJECT_NOT_FOUND」。这是生态级问题（libimobiledevice#1490），此时换 **方式 B：爱思助手/iMazing 手动导出**。
 
 ```sh
 pip install -r pc/requirements.txt
 python pc/pull.py --list                      # 确认设备已连（需装 iTunes 或「Apple 设备」App 的驱动）
-python pc/pull.py --dest D:\相册导出          # 拉取 + 逐文件哈希校验，写 export-report-*.csv
+python pc/pull.py --dest D:\相册导出          # 拉取 + 逐文件哈希校验，写 export-report.csv（固定名，每次覆盖）
 python pc/pull.py --dest D:\相册导出 --zip    # 全 PASS 后顺手打仅存储 ZIP
 ```
 
@@ -107,22 +106,6 @@ python pc/pull.py --dest D:\相册导出 --zip
 
 生成 **ZIP_STORED 仅存储模式**包（字节原封不动，只加目录和 CRC32），微信发这个 zip 给自己/电脑，解压后 `python pc/verify.py 解压目录` 再验一次即可。**红线：不要用微信/QQ 直接发原图文件、不要用网盘「极速上传」**。
 
-### 方式 D：WiFi 直传（数据线 AFC 失效时的主路）
-
-手机 App 首页开「WiFi 传图」→ 电脑同一 WiFi 下（模式参考 LocalSend/GCDWebServer 等成熟工具）：
-
-```sh
-python pc/pull.py --wifi --dest D:\相册导出                 # 自动发现（Bonjour 广播，推荐）
-python pc/pull.py --wifi http://192.168.1.5:8765 --dest D:\相册导出   # 手填 App 显示的地址
-```
-
-- 自动发现没搜到（部分路由器隔离组播）就退回手打地址；依赖 `pip install zeroconf`（requirements.txt 已含）
-- 拉取+逐文件 SHA-256 校验+报告，与方式 A 完全同一条流水线（清单哈希就是防篡改证明，HTTP 明文也不怕）
-- **大文件断点续传**（HTTP Range/206）：中断重跑，.part 从断点接着拉，500MB MOV 不用从头来；已验证文件自动跳过
-- 台式机没无线网卡：手机开**个人热点 + 数据线连电脑**（USB 走的就是网卡），用 App 列表里的 `172.20.10.x` 地址
-- App 端 1MB 分块流式发送（大 MOV 不吃内存），传输期间申请后台时间，切后台/锁屏不容易被掐
-- 安全边界：无鉴权，仅限家庭/个人热点 WiFi 用，别在公共 WiFi 开
-
 ## 本地开发
 
 ```sh
@@ -142,7 +125,7 @@ PC 端测试（Windows 即可真跑）：`python -m unittest discover -s pc -p '
 
 1. 装好 App（SideStore/Sideloadly，见上文）→ 相册选 10 张照片 → 分享 → 「无损导出」
 2. 回 App：卡片显示「已登记 10 项」（重复分享同一批会显示跳过数量）
-3. 数据线连电脑，`python pc/pull.py --dest D:\试导出` → 全 PASS（报 OBJECT_NOT_FOUND 就走 WiFi 直传，见方式 D）
+3. 数据线连电脑，`python pc/pull.py --dest D:\试导出` → 全 PASS（报 OBJECT_NOT_FOUND 就走方式 B：爱思助手/iMazing 手动导出）
 4. 抽 1 张人工抽查：`certutil -hashfile 文件 SHA256` 与 manifest.csv 里那行一致
 5. `--zip` 后微信把 zip 发给自己，PC 解压再 `verify.py` 通过
 6. 大批量（几百张）：保持亮屏（扩展会尽力关自动锁屏）；中途息屏也不丢——解锁后扩展继续收，超时只提示不弃单

@@ -236,4 +236,5 @@ def ensure_utf8_stdout() -> None:
 
 
 def default_report_path(folder: Path) -> Path:
-    return folder / f"export-report-{stamp()}.csv"
+    # 固定一个报告文件名、每次覆盖：目录里永远只有一份报告，不再按时间戳堆积
+    return folder / "export-report.csv"
