@@ -98,12 +98,19 @@ enum SharedIn {
             }
         }
 
+        var manifestError = ""
         if !pending.isEmpty {
-            try? ManifestStore.append(url: manifestURL, rows: pending)
+            do {
+                try ManifestStore.append(url: manifestURL, rows: pending)
+            } catch {
+                // 文件已搬走但清单没写进去 = 记录页看不到（用户以为「没反应」）；如实上报
+                manifestError = "清单追加失败：\(error.localizedDescription)"
+            }
         }
-        ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed) leftover=\(leftovers.count) firstErr=\(firstError)")
+        ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed) leftover=\(leftovers.count) firstErr=\(firstError) manifestErr=\(manifestError)")
         lastDiagnostics = "组 \(SharedGroup.resolvedGroupName)：队列 \(rawLines) 行/解析 \(parsedCount)，收件箱 \(inboxFiles.count) 个文件 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
             + (firstError.isEmpty ? "" : "；首个错误 \(firstError)")
+            + (manifestError.isEmpty ? "" : "；\(manifestError)")
         // 重写队列 = 只剩没搬成的（文件不在的自动销账）
         rewriteQueue(leftovers, entries: entries, queueURL: queueURL, iso: iso)
         return imported
@@ -201,7 +208,14 @@ enum SharedIn {
         let fileName = ExportPlanner.disambiguate(fileName: source.lastPathComponent,
                                                   directory: directory, used: &used)
         let target = targetDir.appendingPathComponent(fileName)
-        try fm.moveItem(at: source, to: target)
+        do {
+            try fm.moveItem(at: source, to: target)
+        } catch {
+            // 少数组权限形态下跨容器 rename 被拒（Operation not permitted）：
+            // 退回复制+删原件，字节不变（哈希已在复制前算过）
+            try fm.copyItem(at: source, to: target)
+            try? fm.removeItem(at: source)
+        }
         // 同批两张同名不同内容的文件落同一目录：used 不更新会让第二张每次都撞名失败
         used.insert((directory + "/" + fileName).lowercased())
 

@@ -88,9 +88,14 @@ final class AppState: ObservableObject {
     /// 相册「分享→无损导出」的收件箱落位：搬进 Documents + 登记清单。
     /// 导出运行中不动文件系统（避免引擎枚举时目录在变）。
     func drainSharedInbox() {
-        guard !exportRunning else { return }
+        guard !exportRunning else {
+            // 静默 return 会让「立即登记」看起来没反应；写明原因
+            shareLastLine = "导出进行中，暂不登记分享文件（结束后会自动登记）"
+            return
+        }
         let documents = documentsURL
         let manifest = manifestURL
+        shareLastLine = "正在登记…" // 点按钮立即有反馈，别让人以为没反应
         Task.detached(priority: .utility) { [weak self] in
             // 两条通道都收：App Group 收件箱（分享扩展）+ Documents/Inbox（分享面板直投，
             // 免费 Sideloadly 不给组权限时唯一能走通的路）
@@ -119,8 +124,8 @@ final class AppState: ObservableObject {
                     self.loadManifest()
                     try? Data(self.shareLastLine.utf8)
                         .write(to: documents.appendingPathComponent("share-last.txt"))
-                } else if self.shareLastLine.isEmpty {
-                    self.shareLastLine = "\(stamp) 无待登记文件"
+                } else {
+                    self.shareLastLine = "\(stamp) 无新文件可登记"
                 }
             }
         }
@@ -328,6 +333,7 @@ final class AppState: ObservableObject {
                             + " stopped=\(summary.stoppedReason ?? "-")")
             self.loadManifest()
             self.refreshFreeSpace() // 预估只算一次，这里只刷新剩余空间
+            self.drainSharedInbox() // 导出期间分享来的文件现在补登记
         }
         // utility QoS（成熟导出器同款）：导出是长活，别跟系统前台需求抢资源
         DispatchQueue.global(qos: .utility).async { engine.run() }
