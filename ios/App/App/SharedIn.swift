@@ -11,7 +11,14 @@ enum SharedIn {
     /// 「扩展没写进同一容器」「队列解析不出」「搬不动」中的哪一种。
     static private(set) var lastDiagnostics = ""
 
-    static func drain(documentsURL: URL, manifestURL: URL) -> Int {
+    /// 登记/跳过/失败分开报：重复分享的旧照片会跳过，必须让用户看见数量而非「没反应」
+    struct DrainResult {
+        var imported = 0
+        var skipped = 0
+        var failed = 0
+    }
+
+    static func drain(documentsURL: URL, manifestURL: URL) -> DrainResult {
         forwardExtensionLog(documentsURL: documentsURL)
         let fm = FileManager.default
         guard let inbox = SharedGroup.inboxDirectory(),
@@ -19,7 +26,7 @@ enum SharedIn {
             // 容器都没定位到 = 重签没给组权限/组名改写异常；profile 探测详情落日志（「文件」App 可见）
             ExportLog.write("GROUP drain: \(SharedGroup.lastProbeDescription)")
             lastDiagnostics = "容器未定位：\(SharedGroup.lastProbeDescription)"
-            return 0
+            return DrainResult()
         }
 
         // 读队列（崩溃安全：文件先落盘再记账；队列文件不存在也不能直接 return——
@@ -57,7 +64,7 @@ enum SharedIn {
         ExportLog.write("SHARE queue lines=\(rawLines) parsed=\(parsedCount) inboxFiles=\(inboxFiles.count) group=\(SharedGroup.resolvedGroupName)")
         guard !entries.isEmpty else {
             lastDiagnostics = "组 \(SharedGroup.resolvedGroupName)：队列 \(rawLines) 行/解析 0 条，收件箱 \(inboxFiles.count) 个文件"
-            return 0
+            return DrainResult()
         }
 
         // 清单一次读入：重复内容守卫 + 重名去重（与挑图补漏共用同口径）
@@ -113,7 +120,7 @@ enum SharedIn {
             + (manifestError.isEmpty ? "" : "；\(manifestError)")
         // 重写队列 = 只剩没搬成的（文件不在的自动销账）
         rewriteQueue(leftovers, entries: entries, queueURL: queueURL, iso: iso)
-        return imported
+        return DrainResult(imported: imported, skipped: skipped, failed: failed)
     }
 
     /// 分享面板「直接打开」（Open in）通道：App 声明 public.image/public.movie 文档类型后，
@@ -121,12 +128,12 @@ enum SharedIn {
     /// 这条通道**不依赖 App Group**——免费 Sideloadly 不给组权限时照片也能送进来。
     /// 每次回前台扫一遍 Inbox（覆盖冷启动没收到 URL 回调、多选分批拷入），
     /// 落位/登记与分享扩展同一条链（note 标「分享直投」）。
-    static func drainOpenInInbox(documentsURL: URL, manifestURL: URL) -> Int {
+    static func drainOpenInInbox(documentsURL: URL, manifestURL: URL) -> DrainResult {
         let fm = FileManager.default
         let inbox = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
-        guard let items = try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) else { return 0 }
+        guard let items = try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) else { return DrainResult() }
         let files = items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
-        guard !files.isEmpty else { return 0 }
+        guard !files.isEmpty else { return DrainResult() }
 
         let sets = guardSets(documentsURL: documentsURL, manifestURL: manifestURL)
         var known = sets.known
@@ -161,7 +168,7 @@ enum SharedIn {
         }
         ExportLog.write("OPENIN ok=\(imported) skip=\(skipped) fail=\(failed)")
         lastDiagnostics += "；直投 Inbox \(files.count) 个 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
-        return imported
+        return DrainResult(imported: imported, skipped: skipped, failed: failed)
     }
 
     /// 重复内容守卫 + 重名去重所需的两个集合（分享导入 / 挑图补漏共用同口径）。

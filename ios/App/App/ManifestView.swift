@@ -39,7 +39,7 @@ struct ManifestView: View {
                             Label("复核全部文件哈希", systemImage: "checkmark.shield")
                         }
                     }
-                    .disabled(state.verifying || state.exportRunning || state.manifestStats.okCount == 0)
+                    .disabled(state.verifying || state.manifestStats.okCount == 0)
                     if state.verifyResult.finished {
                         if state.verifyResult.allGood {
                             Label("复核通过：\(state.verifyResult.checked) 个文件哈希一致", systemImage: "checkmark.seal.fill")

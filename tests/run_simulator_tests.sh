@@ -5,7 +5,7 @@ set -euo pipefail
 udid=$1
 mode=$2
 case "$mode" in
-  smoke) argument=-autoSmoke; names="01-home 02-export 03-manifest 04-pc-guide" ;;
+  smoke) argument=-autoSmoke; names="01-home 02-share-import 03-manifest 04-pc-guide" ;;
   autotest) argument=-autoTest; names= ;;
   *) echo "Unknown test mode: $mode" >&2; exit 1 ;;
 esac
@@ -23,7 +23,7 @@ trap cleanup EXIT
 xcrun simctl terminate "$udid" com.tokeiyo929.photoexport 2>/dev/null || true
 xcrun simctl launch --console "$udid" com.tokeiyo929.photoexport "$argument" > "$mode-console.txt" 2>&1 &
 pid=$!
-# smoke 含真实小导出，默认放宽到 720s；mock 门禁用 PE_POLL_SECONDS 缩短。
+# smoke 含真实分享导入链路（投喂收件箱+drain），默认放宽到 720s；mock 门禁用 PE_POLL_SECONDS 缩短。
 poll_seconds=${PE_POLL_SECONDS:-720}
 for ((second=0; second<poll_seconds; second++)); do
   for name in $names; do

@@ -26,9 +26,6 @@ struct PcGuideView: View {
                     Text("红线：不要用微信/QQ 单发图片（即使选「原图」也无法保证字节不变，且不可验证）；不要用网盘「极速上传」。")
                         .font(.footnote)
                         .foregroundColor(.red)
-                    Text("为什么导出期间要保持前台：iOS 会冻结后台 App，中断不打紧——manifest 就是断点，重进接着跑。")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
                 }
                 .padding(16)
             }

@@ -138,14 +138,13 @@ jobs:
         timeout-minutes: 5
         run: bash tests/test_simulator_runner.sh
 
-      - name: Grant photo library via XCUITest (无人值守授权)
+      - name: Launch smoke via XCUITest（能装能启动能停前台）
         timeout-minutes: 20
         working-directory: ios/App
         run: |
           set -o pipefail
-          # iOS 26 runtime 上宿主侧预授权（simctl privacy / TCC.db）对 readWrite 无效，
-          # 只有用 XCUITest interruption monitor 点掉权限弹窗才能落授权；
-          # 授权按 bundle id 存在模拟器里，后续 -autoSmoke 直接以已授权状态启动。
+          # 产品收缩后 App 不再请求相册权限；此步是 XCUITest 启动自检，
+          # 顺带产出 smoke 步骤要用的 Debug-iphonesimulator 包。
           xcodebuild test -project App.xcodeproj -scheme App \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
             -derivedDataPath build 2>&1 | tee grant-test.log | tail -40
@@ -158,9 +157,6 @@ jobs:
           xcrun simctl boot "$UDID" || true
           xcrun simctl bootstatus "$UDID" -b
           xcrun simctl install "$UDID" ios/App/build/Build/Products/Debug-iphonesimulator/App.app
-          python3 tests/make_fixtures.py
-          xcrun simctl addmedia "$UDID" tests/fixtures/pe-fixture-red-64.png tests/fixtures/pe-fixture-blue-48.png
-          # 相册权限已由上一步的 XCUITest 弹窗授权落库
           bash tests/run_simulator_tests.sh "$UDID" smoke > smoke-debug.txt 2>&1
 
       - name: Run in-app self tests (-autoTest, isolated)

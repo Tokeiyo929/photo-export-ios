@@ -1,14 +1,17 @@
 import Foundation
-import Photos
 import UIKit
 #if DEBUG
 
 /// -autoSmoke 巡访：与 tests/run_simulator_tests.sh 的握手协议一致。
 /// 协议：App 写 tmp/smoke/now-<name> → runner 截图后写回 ack-<name> → 下一页。
 /// 注意目录是 mode 名 smoke，不是参数名 -autoSmoke。
+///
+/// 产品收缩（2026-11）后没有全量导出页：smoke 的「真实链路」改为模拟分享扩展——
+/// 往 App Group 收件箱投两张 PNG + 记账（与扩展落盘/入队完全同构），再走真实
+/// drainSharedInbox 登记。这样 CI 验的正是产品主链路：收件箱→哈希→归档→清单。
 final class SmokeTour {
     static let shared = SmokeTour()
-    static let pages = ["01-home", "02-export", "03-manifest", "04-pc-guide"]
+    static let pages = ["01-home", "02-share-import", "03-manifest", "04-pc-guide"]
     static let pageTabs = [0, 0, 1, 2]
 
     private weak var state: AppState?
@@ -26,7 +29,6 @@ final class SmokeTour {
         try? FileManager.default.removeItem(at: smokeDir.appendingPathComponent("done.txt"))
         try? FileManager.default.removeItem(at: smokeDir.appendingPathComponent("result.txt"))
         print("PE SMOKE: begin pages=\(Self.pages)")
-        state.refreshLibrary() // 权限已由 runner 的 simctl privacy grant 预授权
         runPage(0)
     }
 
@@ -42,20 +44,9 @@ final class SmokeTour {
         print("PE SMOKE: page \(name)")
         switch name {
         case "01-home":
-            seedAndWaitForLibrary(index: index)
-        case "02-export":
-            state.startExport()
-            waitUntil(timeout: 600,
-                      check: { !state.exportRunning && state.lastFinished != nil },
-                      onTimeout: { "导出 600s 未结束" }) { [weak self] in
-                guard let self, let summary = state.lastFinished else { return }
-                if summary.failed > 0 || summary.ok == 0 {
-                    fail("导出结果异常 ok=\(summary.ok) failed=\(summary.failed) —— "
-                         + summary.errors.joined(separator: "; "))
-                } else {
-                    showMarker(index)
-                }
-            }
+            delay(0.8) { [weak self] in self?.showMarker(index) } // 等首页卡片渲染完再截
+        case "02-share-import":
+            importShareFixtures(index: index)
         case "03-manifest":
             state.loadManifest()
             delay(0.8) { [weak self] in self?.showMarker(index) }
@@ -64,60 +55,44 @@ final class SmokeTour {
         }
     }
 
-    /// 等 01-home 相册非空：优先指望 runner 的 simctl addmedia fixture；
-    /// 数秒仍为 0 则用 PHAssetCreationRequest 自种两张真照片兜底
-    /// （部分 iOS 模拟器 runtime 上 addmedia 不生效）。种出的资产走同一导出链路。
-    private func seedAndWaitForLibrary(index: Int) {
+    /// 模拟分享扩展：两张 PNG 落收件箱 + 记账（先落盘再入队，与扩展同构），
+    /// 然后走真实的 drainSharedInbox。断言清单里出现 ≥2 行 OK。
+    private func importShareFixtures(index: Int) {
         guard let state else { fail("AppState 丢失"); return }
-        let deadline = Date().addingTimeInterval(120)
-        var seeded = false
-        var attempts = 0
-        func tick() {
-            if state.libraryCount > 0 {
-                showMarker(index)
-                return
-            }
-            if Date() >= deadline {
-                let status = PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue
-                fail("相册为空 120s：authorizationStatus=\(status)"
-                     + "（0=notDetermined 1=restricted 2=denied 3=authorized 4=limited）")
-                return
-            }
-            attempts += 1
-            if !seeded, attempts >= 12,
-               PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized {
-                seeded = true
-                print("PE SMOKE: 相册仍为空，DEBUG 自种 2 张测试照片")
-                Self.seedSmokeAssets { _ in state.refreshLibrary() }
-            }
-            if attempts % 4 == 0 { state.refreshLibrary() } // 每 1s 重拉，覆盖 fetch 竞态
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { tick() }
+        guard let inbox = SharedGroup.inboxDirectory() else {
+            fail("App Group 容器不可用 \(SharedGroup.lastProbeDescription)")
+            return
         }
-        tick()
-    }
-
-    /// DEBUG-only：往相册种两张纯色照片（红 64²、蓝 48²），写入的 .photo 资源
-    /// 与真实照片走完全相同的 PHAssetResourceManager.writeData 导出链路。
-    private static func seedSmokeAssets(completion: @escaping (Bool) -> Void) {
         func pngData(_ color: UIColor, width: CGFloat, height: CGFloat) -> Data? {
             let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
-            let image = renderer.image { context in
+            return renderer.image { context in
                 color.setFill()
                 context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-            }
-            return image.pngData()
+            }.pngData()
         }
         guard let red = pngData(UIColor(red: 0.86, green: 0.16, blue: 0.16, alpha: 1), width: 64, height: 64),
               let blue = pngData(UIColor(red: 0.16, green: 0.35, blue: 0.86, alpha: 1), width: 48, height: 48) else {
-            completion(false)
+            fail("fixture PNG 生成失败")
             return
         }
-        PHPhotoLibrary.shared().performChanges({
-            for data in [red, blue] {
-                let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, data: data, options: nil)
+        for (name, data) in [("IMG_9001.PNG", red), ("IMG_9002.PNG", blue)] {
+            do {
+                try data.write(to: inbox.appendingPathComponent(name), options: .atomic)
+            } catch {
+                fail("fixture 写收件箱失败：\(error)")
+                return
             }
-        }) { success, _ in completion(success) }
+            SharedGroup.enqueue(file: name, note: nil)
+        }
+        SharedGroup.appendLog("EXT smoke fixtures planted=2")
+        state.drainSharedInbox()
+        waitUntil(timeout: 120,
+                  check: { state.manifestStats.okCount >= 2 },
+                  onTimeout: { "分享导入 120s 未登记 2 项 diag=\(state.shareDiag) last=\(state.shareLastLine)" }) { [weak self] in
+            guard let self else { return }
+            // 等主队列把卡片文案刷出来再截图（drain 结果在 DispatchQueue.main.async 落地）
+            self.delay(0.8) { self.showMarker(index) }
+        }
     }
 
     private func showMarker(_ index: Int) {

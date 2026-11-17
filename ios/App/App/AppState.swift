@@ -1,5 +1,4 @@
 import SwiftUI
-import Photos
 import UIKit
 
 struct ManifestStats {
@@ -30,30 +29,10 @@ struct VerifyResult {
     var allGood: Bool { finished && missing.isEmpty && mismatch.isEmpty }
 }
 
-/// 中心状态。约定：所有 @Published 只在主线程写（引擎回调已由引擎跳主队列，
-/// 其余地方用 DispatchQueue.main.async）。
+/// 中心状态。约定：所有 @Published 只在主线程写（其余地方用 DispatchQueue.main.async）。
+/// 产品收缩（2026-11）：全量导出引擎与 PHPicker 补漏下线，只保留分享导入这一条入口。
 final class AppState: ObservableObject {
 
-    @Published var authorization: PHAuthorizationStatus = .notDetermined
-    @Published var libraryCount = 0
-    /// 引擎同款全库 fetch 看到的最早/最晚拍摄时间——和相册 App 里看到的时间范围对账：
-    /// 对不上 = 有照片不在抓取范围（已隐藏/共享相簿不进 PHAsset 全库抓取），导出会漏
-    @Published var libraryEarliest: Date?
-    @Published var libraryLatest: Date?
-    @Published var estimatedBytes: Int64 = 0
-    @Published var freeBytes: Int64 = 0
-    @Published var estimating = false
-
-    /// 分批导出：每批字节数上限（MB），0 = 不限。大库必备：装不下整个相册时按批导出→拉取→清理。
-    /// 500 MB 档给剩余空间很小的手机（如 256G 只剩几个 G）。
-    @Published var batchMB = 2048
-    var batchBytesLimit: Int64 { Int64(batchMB) * 1_048_576 }
-
-    @Published var exportRunning = false
-    @Published var planningScanned = 0
-    @Published var planningTotal = 0
-    @Published var progress = ExportProgress.empty
-    @Published var lastFinished: ExportSummary?
     @Published var selectedTab = 0
 
     @Published var cleaning = false
@@ -64,8 +43,6 @@ final class AppState: ObservableObject {
     @Published var verifying = false
     @Published var verifyResult = VerifyResult()
 
-    private var exportEngine: ExportEngine?
-    private var keepAwakeTimer: Timer?
     private var wifiServer: WifiServer?
     private var autoTestScheduled = false
 
@@ -73,8 +50,6 @@ final class AppState: ObservableObject {
 
     @Published var wifiRunning = false
     @Published var wifiURLs: [String] = []
-    /// 分享导入待登记提示（首页卡片显示）
-    @Published var sharedImportedCount = 0
     /// 首页「分享导入」卡片状态：收件箱待登记数 / 共享容器是否可用 / 探测详情 / 上次结果
     @Published var sharePending = 0
     @Published var shareContainerOK = true
@@ -86,21 +61,18 @@ final class AppState: ObservableObject {
     @Published var shareDiag = ""
 
     /// 相册「分享→无损导出」的收件箱落位：搬进 Documents + 登记清单。
-    /// 导出运行中不动文件系统（避免引擎枚举时目录在变）。
     func drainSharedInbox() {
-        guard !exportRunning else {
-            // 静默 return 会让「立即登记」看起来没反应；写明原因
-            shareLastLine = "导出进行中，暂不登记分享文件（结束后会自动登记）"
-            return
-        }
         let documents = documentsURL
         let manifest = manifestURL
         shareLastLine = "正在登记…" // 点按钮立即有反馈，别让人以为没反应
         Task.detached(priority: .utility) { [weak self] in
             // 两条通道都收：App Group 收件箱（分享扩展）+ Documents/Inbox（分享面板直投，
             // 免费 Sideloadly 不给组权限时唯一能走通的路）
-            let imported = SharedIn.drain(documentsURL: documents, manifestURL: manifest)
-                + SharedIn.drainOpenInInbox(documentsURL: documents, manifestURL: manifest)
+            let ext = SharedIn.drain(documentsURL: documents, manifestURL: manifest)
+            let openIn = SharedIn.drainOpenInInbox(documentsURL: documents, manifestURL: manifest)
+            let imported = ext.imported + openIn.imported
+            let skipped = ext.skipped + openIn.skipped
+            let failed = ext.failed + openIn.failed
             // 卡片状态每次都刷（哪怕 0 条）：用户分享完回首页要有反馈，不能一片空白
             let ok = SharedGroup.container() != nil
             let pending = SharedGroup.pendingCount()
@@ -108,7 +80,7 @@ final class AppState: ObservableObject {
             let group = SharedGroup.resolvedGroupName
             let diag = SharedIn.lastDiagnostics
             let stamp = Self.iso.string(from: Date())
-            ExportLog.write("SHARE drain imported=\(imported) pending=\(pending) containerOK=\(ok) probe=\(probe) diag=\(diag)")
+            ExportLog.write("SHARE drain imported=\(imported) skipped=\(skipped) failed=\(failed) pending=\(pending) containerOK=\(ok) probe=\(probe) diag=\(diag)")
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.shareContainerOK = ok
@@ -119,13 +91,20 @@ final class AppState: ObservableObject {
                 self.shareExtLine = (try? String(contentsOf: documents.appendingPathComponent("share-ext-last.txt"),
                                                  encoding: .utf8)) ?? ""
                 if imported > 0 {
-                    self.sharedImportedCount = imported
+                    // 重复分享的旧照片会按 内容哈希+文件名 自动跳过——必须写明数量，
+                    // 否则「只登记 9 个」会被理解成丢了 91 个
                     self.shareLastLine = "\(stamp) 已登记 \(imported) 项"
+                        + (skipped > 0 ? "；另有 \(skipped) 项之前已登记过（重复分享自动跳过）" : "")
+                        + (failed > 0 ? "；\(failed) 项失败（见下方诊断）" : "")
                     self.loadManifest()
                     try? Data(self.shareLastLine.utf8)
                         .write(to: documents.appendingPathComponent("share-last.txt"))
+                } else if failed > 0 {
+                    self.shareLastLine = "\(stamp) \(failed) 项登记失败（首个错误见下方诊断）"
+                } else if skipped > 0 {
+                    self.shareLastLine = "\(stamp) 没有新文件：\(skipped) 项之前已登记过（同一张照片重复分享不会重复入库）"
                 } else {
-                    self.shareLastLine = "\(stamp) 无新文件可登记"
+                    self.shareLastLine = "\(stamp) 没有收到新文件"
                 }
             }
         }
@@ -134,7 +113,6 @@ final class AppState: ObservableObject {
     /// 分享面板直投：系统递来的文件 URL（LSSupportsOpeningDocumentsInPlace=true 时是
     /// 原件 URL，需要 security-scope；系统拷到 Inbox 时则交给 drainSharedInbox 统一扫）。
     func receiveOpenIn(_ url: URL) {
-        guard !exportRunning else { return }
         // photoexport://shared = 分享扩展登记完尽力拉起主 App 的信号（扩展侧 open 可能被系统拒），
         // 不是文件，扫一遍收件箱即可
         guard url.isFileURL else {
@@ -176,10 +154,7 @@ final class AppState: ObservableObject {
                                                      iso: ISO8601DateFormatter(), fallbackNote: "分享直投") {
                     try? ManifestStore.append(url: manifest, rows: [row])
                     ExportLog.write("OPENIN url ok=\(url.lastPathComponent)")
-                    DispatchQueue.main.async {
-                        self?.sharedImportedCount += 1
-                        self?.loadManifest()
-                    }
+                    DispatchQueue.main.async { self?.loadManifest() }
                 } else {
                     ExportLog.write("OPENIN url skip=dup \(url.lastPathComponent)")
                 }
@@ -223,148 +198,11 @@ final class AppState: ObservableObject {
             scheduleAutoTest()
         } else if args.contains("-autoSmoke") {
             SmokeTour.shared.begin(state: self)
-        } else {
-            refreshLibrary()
         }
-        #else
-        refreshLibrary()
         #endif
-    }
-
-    // MARK: - 相册状态
-
-    func refreshLibrary() {
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let status = await PhotoLibraryService.requestAccess()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.authorization = status
-                guard status == .authorized || status == .limited else { return }
-                let fetch = PhotoLibraryService.fetchAllAssets() // 引擎同款：creationDate 升序
-                self.libraryCount = fetch.count
-                self.libraryEarliest = fetch.firstObject?.creationDate
-                self.libraryLatest = fetch.lastObject?.creationDate
-                ExportLog.write(String(
-                    format: "LIBRARY count=%d earliest=%@ latest=%@",
-                    fetch.count,
-                    self.libraryEarliest.map { Self.iso.string(from: $0) } ?? "nil",
-                    self.libraryLatest.map { Self.iso.string(from: $0) } ?? "nil"))
-                self.refreshEstimate()
-            }
-        }
-    }
-
-    private func refreshEstimate() {
-        // 全库容量预估要逐资产扫资源。两个约束：
-        // 1) 大库要扫好几分钟，只估一次
-        // 2) 大库干脆不扫：与导出规划的 PhotoKit 扫描并发会竞态（真机 32487 张上
-        //    规划阶段 EXC_BREAKPOINT 的头号嫌疑），分批模式下引擎逐批报大小，预估没用
-        guard !estimating, estimatedBytes == 0 else { return }
-        guard libraryCount > 0, libraryCount <= 2000 else { return }
-        estimating = true
-        Task.detached(priority: .utility) { [weak self] in
-            let bytes = PhotoLibraryService.estimatedLibraryBytes()
-            let free = (try? URL(fileURLWithPath: NSTemporaryDirectory())
-                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-                .volumeAvailableCapacityForImportantUsage) ?? 0
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.estimatedBytes = bytes
-                self.freeBytes = free
-                self.estimating = false
-            }
-        }
-    }
-
-    var spaceWarning: String? {
-        guard estimatedBytes > 0 else { return nil }
-        if freeBytes > 0 && freeBytes < estimatedBytes {
-            return "可用空间不足：约需 " + bytesString(estimatedBytes) + "，剩 " + bytesString(freeBytes)
-        }
-        return nil
-    }
-
-    // MARK: - 导出
-
-    func startExport() {
-        guard !exportRunning, authorization == .authorized || authorization == .limited else { return }
-        exportRunning = true
-        progress = .empty
-        planningScanned = 0
-        planningTotal = 0
-        lastFinished = nil
-        verifyResult = VerifyResult()
-        setKeepAwake(true) // 屏幕常亮，保证前台稳定跑完
-        print("PE EXPORT: start batchLimit=\(batchMB == 0 ? "unlimited" : "\(batchMB)MB")")
-        ExportLog.write("EXPORT start build=\(buildLabel) batchMB=\(batchMB) library=\(libraryCount) free=\(bytesString(freeBytes))")
         // 顺路探测一次 App Group：组解析详情随日志落地（排查分享链路的常驻证据源）
         _ = SharedGroup.container()
         ExportLog.write("GROUP \(SharedGroup.lastProbeDescription)")
-        let engine = ExportEngine(documentsURL: documentsURL, batchBytesLimit: batchBytesLimit)
-        exportEngine = engine
-        engine.onPlanning = { [weak self] scanned, total in
-            guard let self else { return }
-            self.planningScanned = scanned
-            self.planningTotal = total
-        }
-        engine.onStart = { [weak self] total, bytes in
-            guard let self else { return }
-            self.progress.totalFiles = total   // 资产总数（bytes=0：总量拷贝期才知道）
-            self.progress.bytesTotal = bytes
-        }
-        engine.onFileStarted = { [weak self] path in
-            guard let self else { return }
-            self.progress.currentFile = (path as NSString).lastPathComponent
-        }
-        engine.onProgress = { [weak self] snapshot in
-            guard let self else { return }
-            self.progress = snapshot
-        }
-        engine.onFinish = { [weak self] summary in
-            guard let self else { return }
-            self.exportRunning = false
-            self.exportEngine = nil
-            self.setKeepAwake(false)
-            self.lastFinished = summary
-            self.progress.currentFile = ""
-            print("PE EXPORT: finish ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped) cancelled=\(summary.cancelled)")
-            ExportLog.write("EXPORT finish ok=\(summary.ok) failed=\(summary.failed) skipped=\(summary.skipped)"
-                            + " cancelled=\(summary.cancelled) batchLimited=\(summary.batchLimited)"
-                            + " stopped=\(summary.stoppedReason ?? "-")")
-            self.loadManifest()
-            self.refreshFreeSpace() // 预估只算一次，这里只刷新剩余空间
-            self.drainSharedInbox() // 导出期间分享来的文件现在补登记
-        }
-        // utility QoS（成熟导出器同款）：导出是长活，别跟系统前台需求抢资源
-        DispatchQueue.global(qos: .utility).async { engine.run() }
-    }
-
-    func cancelExport() {
-        exportEngine?.cancel()
-    }
-
-    /// 屏幕常亮。isIdleTimerDisabled 只设一次不可靠——用户真机（iOS 27）实锤导出中
-    /// 依旧自动锁屏（低电量/系统紧绷等状态系统可能无视该标志）。导出期间由主线程
-    /// Timer 每 20s 重申一次；readback 落日志，若「设了 true 却读到 false」就是实锤。
-    private func setKeepAwake(_ on: Bool) {
-        UIApplication.shared.isIdleTimerDisabled = on
-        keepAwakeTimer?.invalidate()
-        keepAwakeTimer = nil
-        if on {
-            let timer = Timer(timeInterval: 20, repeats: true) { [weak self] _ in
-                guard let self, self.exportRunning else { return }
-                UIApplication.shared.isIdleTimerDisabled = true
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            keepAwakeTimer = timer
-        }
-        ExportLog.write("KEEP-AWAKE \(on ? "on" : "off") readback=\(UIApplication.shared.isIdleTimerDisabled)")
-    }
-
-    /// 解锁回到前台时立即补一次常亮（上面的 Timer 最多 20s 后也会补，这里即时）
-    func reassertKeepAwakeIfNeeded() {
-        guard exportRunning else { return }
-        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     // MARK: - WiFi 直传
@@ -393,7 +231,7 @@ final class AppState: ObservableObject {
     /// 大库分批工作流的关键一步：确认电脑端已拉取并校验 PASS 后，
     /// 删掉手机端已导出文件腾空间；清单改记 PULLED（哈希保留，证明链不断）。
     func cleanExportedFiles() {
-        guard !exportRunning, !cleaning else { return }
+        guard !cleaning else { return }
         cleaning = true
         let root = documentsURL
         let manifestURL = self.manifestURL
@@ -434,18 +272,6 @@ final class AppState: ObservableObject {
                 self.cleaning = false
                 self.cleanResult = result
                 self.loadManifest()
-                self.refreshFreeSpace()
-            }
-        }
-    }
-
-    func refreshFreeSpace() {
-        Task.detached(priority: .utility) { [weak self] in
-            let free = (try? URL(fileURLWithPath: NSTemporaryDirectory())
-                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-                .volumeAvailableCapacityForImportantUsage) ?? 0
-            DispatchQueue.main.async {
-                self?.freeBytes = free
             }
         }
     }
@@ -473,7 +299,7 @@ final class AppState: ObservableObject {
 
     /// 设备侧复核：对清单里所有 OK 的文件重算哈希（与 PC 端校验互为印证）。
     func verifyExported() {
-        guard !verifying, !exportRunning else { return }
+        guard !verifying else { return }
         verifying = true
         verifyResult = VerifyResult()
         let root = documentsURL
