@@ -380,9 +380,14 @@ async def amain(args: argparse.Namespace) -> int:
     # iOS 27 实锤：对重签名 App，house_arrest 可能服务错误的容器视图（按名读全 OBJECT_NOT_FOUND，
     # App 自己却读写正常）。house_arrest 协议客户端只有 VendDocuments/VendContainer 两个旋钮
     # （读 pymobiledevice3 源码实锤，没有「指定容器」参数），成熟工具（ifuse --documents/iMazing）
-    # 也都只有这条路——所以两种 vend 都试：VendDocuments 读不到已知文件（App 跑过导出后 manifest
-    # 必然存在）就退 VendContainer 整容器再试一次，路径统一加 Documents/ 前缀。
-    offset = ""  # AFC 根偏移：VendDocuments 根就是 Documents；VendContainer 根是容器
+    # 也都只有这条路。
+    # v3 布局（2026-11-17）：App 内部文件住 Library/Application Support/PhotoExport（文件 App
+    # 不可见），旧布局住 Documents 根。VendDocuments 只够得着 Documents（旧布局）；
+    # VendContainer 整容器两种都行——所以先 VendDocuments，不行退 VendContainer 挨个试。
+    APP_SUPPORT = "Library/Application Support/PhotoExport"
+    offset = ""   # AFC 根偏移：VendDocuments 根就是 Documents；VendContainer 根是容器
+    base = ""     # App 内部文件区前缀：旧布局 Documents 根（""），v3 布局 App Support
+    manifest_bytes = None
     try:
         manifest_bytes = await house.get_file_contents(pe_common.MANIFEST_NAME)
     except Exception as error:
@@ -394,31 +399,41 @@ async def amain(args: argparse.Namespace) -> int:
             pass
         house = await HouseArrestService.create(lockdown, bundle, documents_only=False)
         offset = "Documents"
-        try:
-            manifest_bytes = await house.get_file_contents(f"{offset}/{pe_common.MANIFEST_NAME}")
-        except Exception as error2:
-            pe_common.log(f"VendContainer 也读不到 manifest.csv：{error2}")
-            pe_common.log("请确认 App 已在手机上跑过一次导出，bundle id 是否正确（--app）。")
-            pe_common.log("两种 vend 都读不到 = 数据线通道在这台机上废了，走 WiFi："
-                          "App 首页开「WiFi 传图」，电脑 python pc/pull.py --wifi --dest <目录>（自动发现）")
+        for cand_base, label in [("", "Documents 根（旧布局）"),
+                                 (APP_SUPPORT, "Application Support（v3 布局）")]:
+            parts = [p for p in [offset, cand_base, pe_common.MANIFEST_NAME] if p]
+            try:
+                manifest_bytes = await house.get_file_contents("/".join(parts))
+                base = cand_base
+                pe_common.log(f"VendContainer 命中：{label}——数据线走整容器模式。")
+                break
+            except Exception as error2:
+                pe_common.log(f"VendContainer {label} 读不到 manifest.csv：{error2}")
+        if manifest_bytes is None:
+            pe_common.log("两种 vend、新旧布局都读不到 manifest.csv。")
+            pe_common.log("请确认 App 已在手机上跑过一次（登记过至少一张照片），bundle id 是否正确（--app）。")
             return 2
-        pe_common.log("VendContainer 可用——数据线走整容器模式（路径带 Documents/ 前缀）。")
 
     def rooted(rel: str) -> str:
-        """App Documents 下的相对路径 → AFC 会话里的实际路径。"""
-        return f"{offset}/{rel}" if offset else rel
+        """App 内部文件区相对路径 → AFC 会话里的实际路径。"""
+        parts = [p for p in [offset, base, rel] if p]
+        return "/".join(parts)
 
     # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里。
-    # 必须在 manifest 之后处理 vend 兜底，但日志读取仍尽量早：首跑无清单也拿得到日志。
-    # App 收缩后日志归 logs/，兼容旧版根目录
-    diagnostics = {"logs/export-log.txt", "logs/export-log.old.txt",
-                   "export-log.txt", "export-log.old.txt"}
-    for diag in sorted(diagnostics):
+    # v3 布局 logs/ 在 App Support 下；旧版在 Documents/logs/ 或 Documents 根。名字取 basename 落 dest。
+    diag_candidates = []
+    for d in [f"{base}/logs/export-log.txt" if base else "logs/export-log.txt",
+              f"{base}/logs/export-log.old.txt" if base else "logs/export-log.old.txt",
+              "logs/export-log.txt", "logs/export-log.old.txt",
+              "export-log.txt", "export-log.old.txt"]:
+        if d not in diag_candidates:
+            diag_candidates.append(d)
+    for diag in diag_candidates:
         try:
             data = await house.get_file_contents(rooted(diag))
         except Exception:
             continue
-        target = dest / f"device-{diag}"
+        target = dest / f"device-{diag.rsplit('/', 1)[-1]}"
         target.write_bytes(data)
         pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
     rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
@@ -434,25 +449,33 @@ async def amain(args: argparse.Namespace) -> int:
     # 2) 枚举设备端文件（顺带发现清单之外的孤儿文件）
     # iOS 27 真机实测：AFC 对第三方沙盒「按名读可以，列目录 PERM_DENIED」，
     # 列不了就跳过孤儿检测，别让整个拉取炸掉。
+    # v3 布局要逛两棵树：App 内部区（键剥掉 offset+base，对齐清单相对路径）
+    # 和 Documents（键剥 offset，用户存的对照照片/未登记文件以「导入/…」出现）。
     device_files: dict[str, int] = {}
 
-    async def walk_dir(prefix: str) -> None:
+    async def walk_dir(prefix: str, strips: list) -> None:
         for name in await house.listdir(prefix or "/"):
             if name.startswith("."):
                 continue
             path = f"{prefix}/{name}".replace("//", "/")
             if await house.isdir(path):
-                await walk_dir(path)
+                await walk_dir(path, strips)
             else:
                 stat = await house.stat(path)
-                # 存储键统一回 Documents 相对口径（VendContainer 时剥掉 Documents/ 前缀）
                 key = path.lstrip("/")
-                if offset and key.startswith(offset + "/"):
-                    key = key[len(offset) + 1:]
+                for pref in strips:
+                    if pref and key.startswith(pref + "/"):
+                        key = key[len(pref) + 1:]
                 device_files[key] = stat.get("st_size", 0)
 
+    walk_roots: list[tuple[str, list]] = [(rooted(""), [offset, base] if base else ([offset] if offset else []))]
+    docs_root = "Documents" if offset == "Documents" else ""
+    if docs_root and docs_root != rooted(""):
+        # 旧布局时 rooted("") 就是 Documents，不重复逛；v3 布局下 Documents 另逛一遍
+        walk_roots.append((docs_root, [offset] if offset else []))
     try:
-        await walk_dir(offset)
+        for root_path, strips in walk_roots:
+            await walk_dir(root_path, strips)
     except Exception as error:
         pe_common.log(f"设备端文件枚举失败（跳过孤儿检测）：{error}")
     known = {r.relative_path for r in expected}

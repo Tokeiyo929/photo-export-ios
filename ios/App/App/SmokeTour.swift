@@ -48,14 +48,11 @@ final class SmokeTour {
         }
     }
 
-    /// 模拟分享扩展：两张 PNG 落收件箱 + 记账（先落盘再入队，与扩展同构），
+    /// 模拟用户主链路：两张 PNG 存进「导入」文件夹（与相册存储到文件同构），
     /// 然后走真实的 drainSharedInbox。断言清单里出现 ≥2 行 OK。
     private func importShareFixtures(index: Int) {
         guard let state else { fail("AppState 丢失"); return }
-        guard let inbox = SharedGroup.inboxDirectory() else {
-            fail("App Group 容器不可用 \(SharedGroup.lastProbeDescription)")
-            return
-        }
+        let importDir = AppStorage.importFolderURL
         func pngData(_ color: UIColor, width: CGFloat, height: CGFloat) -> Data? {
             let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
             return renderer.image { context in
@@ -70,14 +67,13 @@ final class SmokeTour {
         }
         for (name, data) in [("IMG_9001.PNG", red), ("IMG_9002.PNG", blue)] {
             do {
-                try data.write(to: inbox.appendingPathComponent(name), options: .atomic)
+                try data.write(to: importDir.appendingPathComponent(name), options: .atomic)
             } catch {
-                fail("fixture 写收件箱失败：\(error)")
+                fail("fixture 写导入夹失败：\(error)")
                 return
             }
-            SharedGroup.enqueue(file: name, note: nil)
         }
-        SharedGroup.appendLog("EXT smoke fixtures planted=2")
+        ExportLog.write("SMOKE fixtures planted=2 importDir=\(importDir.path)")
         state.drainSharedInbox()
         waitUntil(timeout: 120,
                   check: { state.manifestStats.okCount >= 2 },

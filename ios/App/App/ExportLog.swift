@@ -15,9 +15,9 @@ enum ExportLog {
     }()
 
     static var logURL: URL {
-        // 内部文件统一归 Documents/logs/：根目录只留 manifest.csv、photos/、logs/、Inbox/
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let logs = docs.appendingPathComponent("logs", isDirectory: true)
+        // 内部文件统一归 App Support/PhotoExport/logs/（文件 App 不可见）；
+        // 用户可见的 Documents 只留「导入」文件夹
+        let logs = AppStorage.storeURL.appendingPathComponent("logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         return logs.appendingPathComponent("export-log.txt")
     }

@@ -54,7 +54,7 @@ enum SharePipelineTest {
         record("分享导入链路: 新版字典队列行") {
             try writeFile("IMG_9001.JPG", byte: 0x11, ctx: ctx)
             try writeQueue(["{\"file\":\"IMG_9001.JPG\",\"note\":\"单元测试\"}"], ctx: ctx)
-            let n = SharedIn.drain(documentsURL: ctx.docs, manifestURL: ctx.manifest).imported
+            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
             try require(n == 1, "imported=\(n)")
             try require(manifestRows() == 1, "manifest 应 1 行")
             try require(!FileManager.default.fileExists(atPath: ctx.queue.path), "队列应被清空删除")
@@ -65,14 +65,14 @@ enum SharePipelineTest {
         record("分享导入链路: 数组队列行（扩展旧版格式）") {
             try writeFile("IMG_9002.JPG", byte: 0x22, ctx: ctx)
             try writeQueue(["[{\"file\":\"IMG_9002.JPG\",\"note\":\"\"}]"], ctx: ctx)
-            let n = SharedIn.drain(documentsURL: ctx.docs, manifestURL: ctx.manifest).imported
+            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
             try require(n == 1, "imported=\(n)")
             try require(manifestRows() == 2, "manifest 应 2 行")
         }
 
         record("分享导入链路: 收件箱孤儿文件补收") {
             try writeFile("IMG_9003.JPG", byte: 0x33, ctx: ctx)
-            let n = SharedIn.drain(documentsURL: ctx.docs, manifestURL: ctx.manifest).imported
+            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
             try require(n == 1, "imported=\(n)")
             try require(manifestRows() == 3, "manifest 应 3 行")
         }
@@ -80,7 +80,7 @@ enum SharePipelineTest {
         record("分享导入链路: 重复内容跳过且不重复登记") {
             try writeFile("IMG_9003.JPG", byte: 0x33, ctx: ctx) // 同名同哈希再来一次
             try writeQueue(["{\"file\":\"IMG_9003.JPG\",\"note\":\"\"}"], ctx: ctx)
-            let n = SharedIn.drain(documentsURL: ctx.docs, manifestURL: ctx.manifest).imported
+            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
             try require(n == 0, "重复应跳过，imported=\(n)")
             try require(manifestRows() == 3, "manifest 行数不应变")
             let names = (try? FileManager.default.contentsOfDirectory(atPath: ctx.inbox.path)) ?? []

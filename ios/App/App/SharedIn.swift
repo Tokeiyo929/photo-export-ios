@@ -7,19 +7,19 @@ import AVFoundation
 /// pull.py 拉取校验/清理与扫描导出的文件完全同权（PC 端零改动）。
 enum SharedIn {
 
-    /// 内部状态文件统一归 Documents/logs/：Documents 根只留 manifest.csv、photos/、logs/、Inbox/
-    static func logsDirectory(_ documentsURL: URL) -> URL {
-        let dir = documentsURL.appendingPathComponent("logs", isDirectory: true)
+    /// 内部状态文件统一归 store（App Support）/logs/：用户可见的 Documents 只留「导入」文件夹
+    static func logsDirectory(_ storeURL: URL) -> URL {
+        let dir = storeURL.appendingPathComponent("logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
-    static func extLastURL(_ documentsURL: URL) -> URL {
-        logsDirectory(documentsURL).appendingPathComponent("share-ext-last.txt")
+    static func extLastURL(_ storeURL: URL) -> URL {
+        logsDirectory(storeURL).appendingPathComponent("share-ext-last.txt")
     }
 
-    static func lastResultURL(_ documentsURL: URL) -> URL {
-        logsDirectory(documentsURL).appendingPathComponent("share-last.txt")
+    static func lastResultURL(_ storeURL: URL) -> URL {
+        logsDirectory(storeURL).appendingPathComponent("share-last.txt")
     }
 
     /// 最近一次 drain 的现场摘要（首页卡片直接显示）：0 项时能一眼看出是
@@ -33,8 +33,8 @@ enum SharedIn {
         var failed = 0
     }
 
-    static func drain(documentsURL: URL, manifestURL: URL) -> DrainResult {
-        forwardExtensionLog(documentsURL: documentsURL)
+    static func drain(storeURL: URL, manifestURL: URL) -> DrainResult {
+        forwardExtensionLog(storeURL: storeURL)
         let fm = FileManager.default
         guard let inbox = SharedGroup.inboxDirectory(),
               let queueURL = SharedGroup.queueURL() else {
@@ -83,7 +83,7 @@ enum SharedIn {
         }
 
         // 清单一次读入：重复内容守卫 + 重名去重（与挑图补漏共用同口径）
-        let sets = guardSets(documentsURL: documentsURL, manifestURL: manifestURL)
+        let sets = guardSets(storeURL: storeURL, manifestURL: manifestURL)
         var known = sets.known
         var used = sets.used
 
@@ -101,7 +101,7 @@ enum SharedIn {
                 continue // 队列里有、文件没了（上次搬到一半崩了）——直接销账
             }
             do {
-                let row = try importFile(source, documentsURL: documentsURL, inboxFile: entry.file,
+                let row = try importFile(source, storeURL: storeURL, inboxFile: entry.file,
                                          known: &known, used: &used, note: entry.note, iso: iso)
                 if let row {
                     pending.append(row)
@@ -145,14 +145,40 @@ enum SharedIn {
     /// 这条通道**不依赖 App Group**——免费 Sideloadly 不给组权限时照片也能送进来。
     /// 每次回前台扫一遍 Inbox（覆盖冷启动没收到 URL 回调、多选分批拷入），
     /// 落位/登记与分享扩展同一条链（note 标「分享直投」）。
-    static func drainOpenInInbox(documentsURL: URL, manifestURL: URL) -> DrainResult {
+    static func drainOpenInInbox(documentsURL: URL, storeURL: URL, manifestURL: URL) -> DrainResult {
         let fm = FileManager.default
         let inbox = documentsURL.appendingPathComponent("Inbox", isDirectory: true)
         guard let items = try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) else { return DrainResult() }
         let files = items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
         guard !files.isEmpty else { return DrainResult() }
+        return importDocuments(files: files, documentsURL: documentsURL, storeURL: storeURL,
+                               manifestURL: manifestURL, fallbackNote: "分享直投", tag: "OPENIN")
+    }
 
-        let sets = guardSets(documentsURL: documentsURL, manifestURL: manifestURL)
+    /// **主通道**：用户在文件 App 里拖进「导入」文件夹（或 Documents 根）的照片。
+    /// 相册 → 分享 → 存储到文件 → On My iPhone/照片无损导出/导入——这条链系统递的是
+    /// 原始字节（用户的对照实验实锤 IMG_xxxx.HEIC 字节一致），Live 图=HEIC+MOV 成对。
+    /// 也顺带收 Documents 根目录的散落文件（用户存错层级时兜住，不收子目录）。
+    static func drainImportFolder(documentsURL: URL, storeURL: URL, manifestURL: URL) -> DrainResult {
+        let fm = FileManager.default
+        var files: [URL] = []
+        let importDir = documentsURL.appendingPathComponent("导入", isDirectory: true)
+        if let items = try? fm.contentsOfDirectory(at: importDir, includingPropertiesForKeys: nil) {
+            files += items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
+        }
+        if let items = try? fm.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: nil) {
+            files += items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
+        }
+        guard !files.isEmpty else { return DrainResult() }
+        return importDocuments(files: files, documentsURL: documentsURL, storeURL: storeURL,
+                               manifestURL: manifestURL, fallbackNote: "文件夹导入", tag: "FOLDER")
+    }
+
+    /// 共用落位链：逐文件 importFile → 清单追加 → 收件箱销账。
+    static private func importDocuments(files: [URL], documentsURL: URL, storeURL: URL,
+                                        manifestURL: URL, fallbackNote: String, tag: String) -> DrainResult {
+        let fm = FileManager.default
+        let sets = guardSets(storeURL: storeURL, manifestURL: manifestURL)
         var known = sets.known
         var used = sets.used
         var pending: [ManifestRow] = []
@@ -163,9 +189,9 @@ enum SharedIn {
 
         for url in files {
             do {
-                if let row = try importFile(url, documentsURL: documentsURL, inboxFile: url.lastPathComponent,
+                if let row = try importFile(url, storeURL: storeURL, inboxFile: url.lastPathComponent,
                                             known: &known, used: &used, note: "", iso: iso,
-                                            fallbackNote: "分享直投") {
+                                            fallbackNote: fallbackNote) {
                     pending.append(row)
                     let base = row.relativePath.split(separator: "/").last.map(String.init) ?? url.lastPathComponent
                     known.insert("\(row.sha256)|\(base)")
@@ -176,27 +202,27 @@ enum SharedIn {
                 try? fm.removeItem(at: url)
             } catch {
                 failed += 1
-                ExportLog.write("OPENIN import FAIL \(url.lastPathComponent): \(error)")
+                ExportLog.write("\(tag) import FAIL \(url.lastPathComponent): \(error)")
             }
         }
 
         if !pending.isEmpty {
             try? ManifestStore.append(url: manifestURL, rows: pending)
         }
-        ExportLog.write("OPENIN ok=\(imported) skip=\(skipped) fail=\(failed)")
-        lastDiagnostics += "；直投 Inbox \(files.count) 个 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
+        ExportLog.write("\(tag) ok=\(imported) skip=\(skipped) fail=\(failed)")
+        lastDiagnostics += "；\(fallbackNote) \(files.count) 个 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
         return DrainResult(imported: imported, skipped: skipped, failed: failed)
     }
 
     /// 重复内容守卫 + 重名去重所需的两个集合（分享导入 / 挑图补漏共用同口径）。
     /// known 键：sha256|文件名（同一张分享两次 → 跳过）；used 键：Documents 现有相对路径（小写）。
-    static func guardSets(documentsURL: URL, manifestURL: URL) -> (known: Set<String>, used: Set<String>) {
+    static func guardSets(storeURL: URL, manifestURL: URL) -> (known: Set<String>, used: Set<String>) {
         let fm = FileManager.default
         let (rows, _) = ManifestStore.load(url: manifestURL)
         let known = Set(rows.map { "\($0.sha256)|\($0.relativePath.split(separator: "/").last.map(String.init) ?? "")" })
         var used = Set(rows.map { $0.relativePath.lowercased() })
-        if let walker = fm.enumerator(at: documentsURL, includingPropertiesForKeys: nil) {
-            let prefix = documentsURL.path + "/"
+        if let walker = fm.enumerator(at: storeURL, includingPropertiesForKeys: nil) {
+            let prefix = storeURL.path + "/"
             for case let url as URL in walker {
                 used.insert(url.path.replacingOccurrences(of: prefix, with: "").lowercased())
             }
@@ -207,7 +233,7 @@ enum SharedIn {
     /// 单文件：算哈希→定归档目录（EXIF 拍摄时间优先）→消歧落位→出清单行。
     /// 返回 nil 表示重复内容（跳过）；抛错表示搬不动（留在收件箱）。
     /// fallbackNote：note 为空时的来源标注（分享导入/挑图补漏各自标）。
-    static func importFile(_ source: URL, documentsURL: URL, inboxFile: String,
+    static func importFile(_ source: URL, storeURL: URL, inboxFile: String,
                            known: inout Set<String>, used: inout Set<String>,
                            note: String, iso: ISO8601DateFormatter,
                            fallbackNote: String = "相册分享导入") throws -> ManifestRow? {
@@ -229,7 +255,7 @@ enum SharedIn {
         // 统一挂 photos/ 前缀（迁移后的布局约定）：manifest 行、磁盘路径、used 键三处一致
         let fullDir = "photos/" + directory
 
-        let targetDir = documentsURL.appendingPathComponent(fullDir, isDirectory: true)
+        let targetDir = storeURL.appendingPathComponent(fullDir, isDirectory: true)
         try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
         var fileName = ExportPlanner.disambiguate(fileName: source.lastPathComponent,
                                                   directory: fullDir, used: &used)
@@ -317,7 +343,7 @@ enum SharedIn {
 
     /// 扩展的现场日志转写进主日志：分享扩展崩了没有任何报告渠道，这是它把
     /// 证据带出设备的唯一通道（转写完即删，下次分享重新积累）。
-    private static func forwardExtensionLog(documentsURL: URL) {
+    private static func forwardExtensionLog(storeURL: URL) {
         guard let root = SharedGroup.container(),
               let raw = try? String(contentsOf: root.appendingPathComponent("share-log.txt"),
                                     encoding: .utf8),
@@ -329,7 +355,7 @@ enum SharedIn {
         }
         // 扩展最后一行落 Documents（首页卡片显示）：主 App 看到 0 项时，
         // 对比「EXT container resolved=…」就能判断是不是写了另一个容器
-        try? Data(last.utf8).write(to: extLastURL(documentsURL))
+        try? Data(last.utf8).write(to: extLastURL(storeURL))
         try? FileManager.default.removeItem(at: root.appendingPathComponent("share-log.txt"))
     }
 }

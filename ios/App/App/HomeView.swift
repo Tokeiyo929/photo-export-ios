@@ -35,63 +35,42 @@ struct HomeView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("相册分享 → 本 App 登记 → 电脑拉取校验 · 字节级复制 · SHA-256 可证明")
+            Text("相册 → 存储到「导入」文件夹 → 本 App 登记 → 电脑拉取校验 · 字节级原片 · SHA-256 可证明")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
-            Text("构建 \(state.buildLabel) · 工作日志 export-log.txt 在「文件」里可见")
+            Text("构建 \(state.buildLabel) · 工作日志在 App 沙盒内部（电脑拉取时自动带回）")
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
     }
 
-    /// 「分享导入」状态卡：分享扩展写完文件后回首页要有反馈——此前 sharedImportedCount
-    /// 只赋值不显示，用户以为没反应。容器不可用时直接写明探测详情并指路直投通道。
+    /// 「导入」状态卡：主通道 = 相册存储到文件。系统递的是原始字节
+    /// （用户对照实验实锤 IMG_xxxx.HEIC 字节一致），Live 图=HEIC+MOV 成对。
     private var shareCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("分享导入", systemImage: "square.and.arrow.down.on.square")
+            Label("导入照片", systemImage: "square.and.arrow.down.on.square")
                 .font(.headline)
-            if state.shareContainerOK {
-                Text(state.sharePending > 0
-                     ? "收件箱还有 \(state.sharePending) 项待登记（点「立即登记」或重开 App）"
-                     : "收件箱已清空")
-                    .font(.subheadline)
-                Text("主 App 容器：\(state.shareGroup.isEmpty ? "未定位" : state.shareGroup)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                if !state.shareDiag.isEmpty {
-                    Text(state.shareDiag)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                if !state.shareLastLine.isEmpty {
-                    Text(state.shareLastLine)
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-                }
-                if !state.shareExtLine.isEmpty {
-                    Text("扩展侧最后一条：\(state.shareExtLine)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                Button("立即登记") { state.drainSharedInbox() }
+            Text("① 相册选片 → 分享 → **存储到文件**\n② 选「我的 iPhone」→「照片无损导出」→「导入」\n③ 回这里点「立即登记」")
+                .font(.subheadline)
+            if state.sharePending > 0 {
+                Text("扩展收件箱还有 \(state.sharePending) 项待登记")
                     .font(.footnote)
-                    .buttonStyle(.bordered)
-            } else {
-                Text("共享容器不可用（App Group 没注册上）")
-                    .font(.subheadline)
-                    .foregroundColor(.red)
-                Text(state.shareProbe)
+                    .foregroundColor(.orange)
+            }
+            Text("登记结果：\(state.shareLastLine.isEmpty ? "还没有过" : state.shareLastLine)")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+            if !state.shareDiag.isEmpty {
+                Text(state.shareDiag)
                     .font(.caption2)
-                    .foregroundColor(.secondary)
-                if !state.shareExtLine.isEmpty {
-                    Text("扩展侧最后一条：\(state.shareExtLine)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                Text("替代：分享面板 App 行点「照片无损导出」直接投递")
-                    .font(.footnote)
                     .foregroundColor(.secondary)
             }
+            Button("立即登记") { state.drainSharedInbox() }
+                .font(.footnote)
+                .buttonStyle(.bordered)
+            Text("备选：分享面板点「照片无损导出」App 图标（直投）/ 扩展按钮，都会自动汇入这里")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)

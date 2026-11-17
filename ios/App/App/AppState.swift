@@ -43,19 +43,22 @@ final class AppState: ObservableObject {
     @Published var shareGroup = ""
     @Published var shareDiag = ""
 
-    /// 相册「分享→无损导出」的收件箱落位：搬进 Documents + 登记清单。
+    /// 「导入」文件夹（主通道）+ 分享扩展 + 直投 Inbox 的收件落位：搬进 App Support + 登记清单。
     func drainSharedInbox() {
-        let documents = documentsURL
+        let documents = AppStorage.documentsURL
+        let store = AppStorage.storeURL
+        _ = AppStorage.importFolderURL // 顺手保证「导入」文件夹在文件 App 里可见
         let manifest = manifestURL
         shareLastLine = "正在登记…" // 点按钮立即有反馈，别让人以为没反应
         Task.detached(priority: .utility) { [weak self] in
-            // 两条通道都收：App Group 收件箱（分享扩展）+ Documents/Inbox（分享面板直投，
-            // 免费 Sideloadly 不给组权限时唯一能走通的路）
-            let ext = SharedIn.drain(documentsURL: documents, manifestURL: manifest)
-            let openIn = SharedIn.drainOpenInInbox(documentsURL: documents, manifestURL: manifest)
-            let imported = ext.imported + openIn.imported
-            let skipped = ext.skipped + openIn.skipped
-            let failed = ext.failed + openIn.failed
+            // 三条通道都收：①文件 App「导入」文件夹（相册→存储到文件，主通道）
+            // ②App Group 收件箱（分享扩展）③Documents/Inbox（分享面板直投）
+            let ext = SharedIn.drain(storeURL: store, manifestURL: manifest)
+            let openIn = SharedIn.drainOpenInInbox(documentsURL: documents, storeURL: store, manifestURL: manifest)
+            let folder = SharedIn.drainImportFolder(documentsURL: documents, storeURL: store, manifestURL: manifest)
+            let imported = ext.imported + openIn.imported + folder.imported
+            let skipped = ext.skipped + openIn.skipped + folder.skipped
+            let failed = ext.failed + openIn.failed + folder.failed
             // 卡片状态每次都刷（哪怕 0 条）：用户分享完回首页要有反馈，不能一片空白
             let ok = SharedGroup.container() != nil
             let pending = SharedGroup.pendingCount()
@@ -71,7 +74,7 @@ final class AppState: ObservableObject {
                 self.shareProbe = probe
                 self.shareGroup = group
                 self.shareDiag = diag
-                self.shareExtLine = (try? String(contentsOf: SharedIn.extLastURL(documents), encoding: .utf8)) ?? ""
+                self.shareExtLine = (try? String(contentsOf: SharedIn.extLastURL(store), encoding: .utf8)) ?? ""
                 self.refreshStorage()
                 if imported > 0 {
                     // 重复分享的旧照片会按 内容哈希+文件名 自动跳过——必须写明数量，
@@ -81,7 +84,7 @@ final class AppState: ObservableObject {
                         + (failed > 0 ? "；\(failed) 项失败（见下方诊断）" : "")
                     self.loadManifest()
                     try? Data(self.shareLastLine.utf8)
-                        .write(to: SharedIn.lastResultURL(documents))
+                        .write(to: SharedIn.lastResultURL(store))
                 } else if failed > 0 {
                     self.shareLastLine = "\(stamp) \(failed) 项登记失败（首个错误见下方诊断）"
                 } else if skipped > 0 {
@@ -102,8 +105,13 @@ final class AppState: ObservableObject {
             drainSharedInbox()
             return
         }
-        let documents = documentsURL
+        let documents = AppStorage.documentsURL
+        let store = AppStorage.storeURL
         if url.path.hasPrefix(documents.appendingPathComponent("Inbox").path + "/") {
+            drainSharedInbox()
+            return
+        }
+        if url.path.hasPrefix(documents.appendingPathComponent("导入").path + "/") {
             drainSharedInbox()
             return
         }
@@ -128,11 +136,11 @@ final class AppState: ObservableObject {
                     return
                 }
             }
-            let sets = SharedIn.guardSets(documentsURL: documents, manifestURL: manifest)
+            let sets = SharedIn.guardSets(storeURL: store, manifestURL: manifest)
             var known = sets.known
             var used = sets.used
             do {
-                if let row = try SharedIn.importFile(source, documentsURL: documents, inboxFile: url.lastPathComponent,
+                if let row = try SharedIn.importFile(source, storeURL: store, inboxFile: url.lastPathComponent,
                                                      known: &known, used: &used, note: "",
                                                      iso: ISO8601DateFormatter(), fallbackNote: "分享直投") {
                     try? ManifestStore.append(url: manifest, rows: [row])
@@ -147,9 +155,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    var documentsURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    }
+    var documentsURL: URL { AppStorage.documentsURL }
 
     /// CI 构建号（Info.plist PEBuild，workflow 注入）；本地开发显示 dev。
     var buildLabel: String {
@@ -157,9 +163,7 @@ final class AppState: ObservableObject {
         return build.isEmpty ? "dev" : "#\(build)"
     }
 
-    var manifestURL: URL {
-        documentsURL.appendingPathComponent("manifest.csv")
-    }
+    var manifestURL: URL { AppStorage.manifestURL }
 
     init() {
         bootstrap()
@@ -169,14 +173,23 @@ final class AppState: ObservableObject {
         setvbuf(stdout, nil, _IOLBF, 0) // 行缓冲：console 重定向到文件时也能逐行看到输出
         print("PE BOOT: args=\(ProcessInfo.processInfo.arguments) debug=\(_isDebugAssertConfiguration())")
         ExportLog.write("BOOT build=\(buildLabel) args=\(ProcessInfo.processInfo.arguments.joined(separator: " "))")
-        migrateDocumentLayout()
+        // 迁移链（都幂等，按历史状态各取所需）：
+        // ① v1 收编 Documents 根的散落年份目录/内部文件（manifest 还在 Documents 时就要做）
+        collectYearDirs(root: AppStorage.documentsURL,
+                        manifestURL: AppStorage.documentsURL.appendingPathComponent("manifest.csv"))
+        // ② v3：manifest/photos/logs 整体搬进 Application Support（文件 App 不可见）
+        AppStorage.migrateLegacyDocuments()
+        // ③ store 里万一也有散落目录（半途迁移等），同样收编
+        collectYearDirs(root: AppStorage.storeURL, manifestURL: manifestURL)
+        // ④ 「导入」文件夹必须在文件 App 里一直可见（用户的主入口）
+        _ = AppStorage.importFolderURL
         loadManifest()
         // 上次分享导入结果（跨重启可见）：分享扩展写完回首页没反馈的投诉就靠它兜住
-        let logs = SharedIn.logsDirectory(documentsURL)
-        let legacyRoot = { (name: String) in self.documentsURL.appendingPathComponent(name) }
-        shareLastLine = (try? String(contentsOf: SharedIn.lastResultURL(documentsURL), encoding: .utf8))
+        let store = AppStorage.storeURL
+        let legacyRoot = { (name: String) in AppStorage.documentsURL.appendingPathComponent(name) }
+        shareLastLine = (try? String(contentsOf: SharedIn.lastResultURL(store), encoding: .utf8))
             ?? (try? String(contentsOf: legacyRoot("share-last.txt"), encoding: .utf8)) ?? ""
-        shareExtLine = (try? String(contentsOf: SharedIn.extLastURL(documentsURL), encoding: .utf8))
+        shareExtLine = (try? String(contentsOf: SharedIn.extLastURL(store), encoding: .utf8))
             ?? (try? String(contentsOf: legacyRoot("share-ext-last.txt"), encoding: .utf8)) ?? ""
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
@@ -191,24 +204,22 @@ final class AppState: ObservableObject {
         ExportLog.write("GROUP \(SharedGroup.lastProbeDescription)")
     }
 
-    // MARK: - 目录布局（干净根目录：manifest.csv + photos/ + logs/ + Inbox/）
+    // MARK: - 目录布局（v3：内部文件住 App Support，Documents 只留「导入」文件夹）
 
-    /// 一次性迁移：老版本把照片年份目录和 share-*/export-log* 散在 Documents 根。
-    /// 迁移后根目录只剩 manifest.csv（PC 接口）、photos/（照片）、logs/（内部文件）、Inbox/（系统直投）。
-    /// 同步执行：都是 rename 级操作；迁移完才 loadManifest，避免并发读写清单。
-    private func migrateDocumentLayout() {
+    /// v1 收编（参数化，Documents 与 store 各跑一次）：老版本把照片年份目录和
+    /// share-*/export-log* 散在根目录——年份目录整体挪进 photos/，内部文件挪进 logs/，
+    /// 清单相对路径补 photos/ 前缀。根上没有散落目录时无事发生。
+    private func collectYearDirs(root: URL, manifestURL: URL) {
         let fm = FileManager.default
-        let root = documentsURL
         let photos = root.appendingPathComponent("photos", isDirectory: true)
-        let already = fm.fileExists(atPath: photos.path)
-        if !already {
+        if !fm.fileExists(atPath: photos.path) {
             try? fm.createDirectory(at: photos, withIntermediateDirectories: true)
         }
         var movedDirs: Set<String> = []
         if let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
             for url in items {
                 let name = url.lastPathComponent
-                if name == "Inbox" || name == "photos" || name == "logs" { continue }
+                if name == "Inbox" || name == "photos" || name == "logs" || name == "导入" { continue }
                 var isDir: ObjCBool = false
                 guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
                 // 照片归档目录（年份/UNDATED）整体挪进 photos/
@@ -216,7 +227,7 @@ final class AppState: ObservableObject {
                 movedDirs.insert(name)
             }
         }
-        moveAuxFilesToLogs()
+        moveAuxFilesToLogs(root: root)
         // 不以 photos/ 是否已存在为门槛：ipa-61 期间导入过裸路径文件的用户，
         // 根目录会重新长出 2025/ 这类目录——每次启动都要把它们收编进 photos/
         guard !movedDirs.isEmpty else { return }
@@ -235,14 +246,14 @@ final class AppState: ObservableObject {
         if changed {
             try? ManifestStore.writeAll(url: manifestURL, rows: updated)
         }
-        ExportLog.write("MIGRATE layout dirs=[\(movedDirs.sorted().joined(separator: ","))] rows=\(updated.count) malformed=\(malformed) rewritten=\(changed)")
+        ExportLog.write("MIGRATE layout root=\(root.lastPathComponent) dirs=[\(movedDirs.sorted().joined(separator: ","))] rows=\(updated.count) malformed=\(malformed) rewritten=\(changed)")
     }
 
     /// 根目录散落的内部文件（share-*/export-log*）归 logs/
-    private func moveAuxFilesToLogs() {
+    private func moveAuxFilesToLogs(root: URL) {
         let fm = FileManager.default
-        let logs = SharedIn.logsDirectory(documentsURL)
-        guard let items = try? fm.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: nil) else { return }
+        let logs = SharedIn.logsDirectory(root)
+        guard let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
         for url in items {
             let name = url.lastPathComponent
             let isAux = name.hasPrefix("share-") || name.hasPrefix("export-log")
@@ -262,24 +273,27 @@ final class AppState: ObservableObject {
     @Published var storageScan = StorageScan()
     @Published var scanningStorage = false
 
-    /// 实测 Documents 里的照片数与字节（不含 manifest/logs 这些内部小文件）——
+    /// 实测手机端存的照片数与字节（store/photos + Documents 的导入夹/Inbox/散落文件）——
     /// 「清理干净没有」不用猜：照片 0 个 = 干净；比待拉取数多 = 有已拉取未清或残留。
     func refreshStorage() {
         guard !scanningStorage else { return }
         scanningStorage = true
-        let root = documentsURL
+        let store = AppStorage.storeURL
+        let documents = AppStorage.documentsURL
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var scan = StorageScan()
             let fm = FileManager.default
-            let logsPrefix = SharedIn.logsDirectory(root).path + "/"
-            if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
-                for case let url as URL in walker {
-                    let path = url.path
-                    if path.hasPrefix(logsPrefix) || path == root.appendingPathComponent("manifest.csv").path { continue }
-                    guard let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-                          vals.isRegularFile == true else { continue }
-                    scan.photos += 1
-                    scan.bytes += Int64(vals.fileSize ?? 0)
+            let logsPrefix = SharedIn.logsDirectory(store).path + "/"
+            for root in [store, documents] {
+                if let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
+                    for case let url as URL in walker {
+                        let path = url.path
+                        if path.hasPrefix(logsPrefix) || path == store.appendingPathComponent("manifest.csv").path { continue }
+                        guard let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                              vals.isRegularFile == true else { continue }
+                        scan.photos += 1
+                        scan.bytes += Int64(vals.fileSize ?? 0)
+                    }
                 }
             }
             scan.scanned = true
@@ -299,7 +313,7 @@ final class AppState: ObservableObject {
     func cleanExportedFiles() {
         guard !cleaning else { return }
         cleaning = true
-        let root = documentsURL
+        let root = AppStorage.storeURL
         let manifestURL = self.manifestURL
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let (rows, _) = ManifestStore.load(url: manifestURL)
