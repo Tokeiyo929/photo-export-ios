@@ -511,7 +511,8 @@ final class AppState: ObservableObject {
             guard let self else { return }
             var lines: [String] = []
             var failed = 0
-            for outcome in TestSupport.runSelfTests() {
+            let outcomes = TestSupport.runSelfTests() + SharePipelineTest.run()
+            for outcome in outcomes {
                 lines.append((outcome.passed ? "PASS " : "FAIL ") + outcome.name
                              + (outcome.passed ? "" : " —— " + outcome.detail))
                 if !outcome.passed { failed += 1 }
