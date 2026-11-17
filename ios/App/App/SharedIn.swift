@@ -17,8 +17,9 @@ enum SharedIn {
             return 0
         }
 
-        // 读队列（崩溃安全：文件先落盘再记账，这行没有就当下次再收）
-        guard let raw = try? String(contentsOf: queueURL, encoding: .utf8) else { return 0 }
+        // 读队列（崩溃安全：文件先落盘再记账；队列文件不存在也不能直接 return——
+        // 收件箱里可能已有落盘文件，交给下面的孤儿补收扫一遍）
+        let raw = (try? String(contentsOf: queueURL, encoding: .utf8)) ?? ""
         // 队列行两种历史格式都收：扩展旧版写的是数组 [ {…} ]（老队列文件还在用户手机上），
         // 新版写单个字典 {…}。之前只认字典 → 旧格式整份被跳过 → 文件永远堆在收件箱，
         // 「立即登记」点了没反应。
@@ -85,8 +86,8 @@ enum SharedIn {
 
         if !pending.isEmpty {
             try? ManifestStore.append(url: manifestURL, rows: pending)
-            ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed)")
         }
+        ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed) leftover=\(leftovers.count)")
         // 重写队列 = 只剩没搬成的（文件不在的自动销账）
         rewriteQueue(leftovers, entries: entries, queueURL: queueURL, iso: iso)
         return imported
