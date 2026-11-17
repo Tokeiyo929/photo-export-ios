@@ -14,6 +14,9 @@ enum SharedGroup {
     /// 最近一次 container() 探测的结论（诊断用，失败弹窗/主 App 日志都带它）
     static private(set) var lastProbeDescription = "not probed"
 
+    /// 采纳的组名（inside 诊断：主 App 与扩展各显示自己落到的组名，一致才算同容器）
+    static private(set) var resolvedGroupName = ""
+
     private static var resolvedContainer: URL?
 
     // MARK: - profile 解析
@@ -115,6 +118,7 @@ enum SharedGroup {
             }
             defaults?.removeObject(forKey: "photoexport.group.probe")
             resolvedContainer = url
+            resolvedGroupName = name
             lastProbeDescription = "resolved=\(name)（主App profile \(appSide.groups.count) 组 / appex profile \(extSideGroups.count) 组）"
             return url
         }

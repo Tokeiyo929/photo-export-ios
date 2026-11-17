@@ -7,6 +7,10 @@ import AVFoundation
 /// pull.py 拉取校验/清理与扫描导出的文件完全同权（PC 端零改动）。
 enum SharedIn {
 
+    /// 最近一次 drain 的现场摘要（首页卡片直接显示）：0 项时能一眼看出是
+    /// 「扩展没写进同一容器」「队列解析不出」「搬不动」中的哪一种。
+    static private(set) var lastDiagnostics = ""
+
     static func drain(documentsURL: URL, manifestURL: URL) -> Int {
         forwardExtensionLog(documentsURL: documentsURL)
         let fm = FileManager.default
@@ -14,6 +18,7 @@ enum SharedIn {
               let queueURL = SharedGroup.queueURL() else {
             // 容器都没定位到 = 重签没给组权限/组名改写异常；profile 探测详情落日志（「文件」App 可见）
             ExportLog.write("GROUP drain: \(SharedGroup.lastProbeDescription)")
+            lastDiagnostics = "容器未定位：\(SharedGroup.lastProbeDescription)"
             return 0
         }
 
@@ -39,14 +44,21 @@ enum SharedIn {
         // 收件箱里有、队列里没有的孤儿文件也要收：扩展是「先落盘再记账」，
         // 记账那步失败/旧格式丢行时靠这里自愈，否则文件会永远堆着
         let queued = Set(entries.map(\.file))
+        let parsedCount = entries.count
+        var inboxFiles: [String] = []
         if let items = try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil) {
-            for url in items where !url.hasDirectoryPath && !url.lastPathComponent.hasPrefix(".")
-                && !queued.contains(url.lastPathComponent) {
-                entries.append((url.lastPathComponent, "孤儿补收"))
+            inboxFiles = items.filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
+                .map(\.lastPathComponent)
+            for name in inboxFiles where !queued.contains(name) {
+                entries.append((name, "孤儿补收"))
             }
         }
-        ExportLog.write("SHARE queue lines=\(raw.split(separator: "\n").count) parsed=\(entries.count)")
-        guard !entries.isEmpty else { return 0 }
+        let rawLines = raw.split(separator: "\n").count
+        ExportLog.write("SHARE queue lines=\(rawLines) parsed=\(parsedCount) inboxFiles=\(inboxFiles.count) group=\(SharedGroup.resolvedGroupName)")
+        guard !entries.isEmpty else {
+            lastDiagnostics = "组 \(SharedGroup.resolvedGroupName)：队列 \(rawLines) 行/解析 0 条，收件箱 \(inboxFiles.count) 个文件"
+            return 0
+        }
 
         // 清单一次读入：重复内容守卫 + 重名去重（与挑图补漏共用同口径）
         let sets = guardSets(documentsURL: documentsURL, manifestURL: manifestURL)
@@ -56,6 +68,7 @@ enum SharedIn {
         var imported = 0
         var skipped = 0
         var failed = 0
+        var firstError = ""
         var pending: [ManifestRow] = []
         var leftovers: [String] = []
         let iso = ISO8601DateFormatter()
@@ -80,6 +93,7 @@ enum SharedIn {
                 }
             } catch {
                 failed += 1
+                if firstError.isEmpty { firstError = "\(entry.file): \(error.localizedDescription)" }
                 leftovers.append(entry.file) // 留在收件箱，下次再试
             }
         }
@@ -87,7 +101,9 @@ enum SharedIn {
         if !pending.isEmpty {
             try? ManifestStore.append(url: manifestURL, rows: pending)
         }
-        ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed) leftover=\(leftovers.count)")
+        ExportLog.write("SHARE-IMPORT ok=\(imported) skip=\(skipped) fail=\(failed) leftover=\(leftovers.count) firstErr=\(firstError)")
+        lastDiagnostics = "组 \(SharedGroup.resolvedGroupName)：队列 \(rawLines) 行/解析 \(parsedCount)，收件箱 \(inboxFiles.count) 个文件 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
+            + (firstError.isEmpty ? "" : "；首个错误 \(firstError)")
         // 重写队列 = 只剩没搬成的（文件不在的自动销账）
         rewriteQueue(leftovers, entries: entries, queueURL: queueURL, iso: iso)
         return imported
@@ -137,6 +153,7 @@ enum SharedIn {
             try? ManifestStore.append(url: manifestURL, rows: pending)
         }
         ExportLog.write("OPENIN ok=\(imported) skip=\(skipped) fail=\(failed)")
+        lastDiagnostics += "；直投 Inbox \(files.count) 个 → 登记 \(imported) 跳过 \(skipped) 失败 \(failed)"
         return imported
     }
 

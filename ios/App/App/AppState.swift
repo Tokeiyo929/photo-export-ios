@@ -81,6 +81,9 @@ final class AppState: ObservableObject {
     @Published var shareProbe = ""
     @Published var shareLastLine = ""
     @Published var shareExtLine = ""
+    /// 一次截图定位 0 项原因：主 App 落到的组名 + 队列/收件箱/导入摘要
+    @Published var shareGroup = ""
+    @Published var shareDiag = ""
 
     /// 相册「分享→无损导出」的收件箱落位：搬进 Documents + 登记清单。
     /// 导出运行中不动文件系统（避免引擎枚举时目录在变）。
@@ -97,13 +100,17 @@ final class AppState: ObservableObject {
             let ok = SharedGroup.container() != nil
             let pending = SharedGroup.pendingCount()
             let probe = SharedGroup.lastProbeDescription
+            let group = SharedGroup.resolvedGroupName
+            let diag = SharedIn.lastDiagnostics
             let stamp = Self.iso.string(from: Date())
-            ExportLog.write("SHARE drain imported=\(imported) pending=\(pending) containerOK=\(ok) probe=\(probe)")
+            ExportLog.write("SHARE drain imported=\(imported) pending=\(pending) containerOK=\(ok) probe=\(probe) diag=\(diag)")
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.shareContainerOK = ok
                 self.sharePending = pending
                 self.shareProbe = probe
+                self.shareGroup = group
+                self.shareDiag = diag
                 self.shareExtLine = (try? String(contentsOf: documents.appendingPathComponent("share-ext-last.txt"),
                                                  encoding: .utf8)) ?? ""
                 if imported > 0 {
@@ -123,6 +130,12 @@ final class AppState: ObservableObject {
     /// 原件 URL，需要 security-scope；系统拷到 Inbox 时则交给 drainSharedInbox 统一扫）。
     func receiveOpenIn(_ url: URL) {
         guard !exportRunning else { return }
+        // photoexport://shared = 分享扩展登记完尽力拉起主 App 的信号（扩展侧 open 可能被系统拒），
+        // 不是文件，扫一遍收件箱即可
+        guard url.isFileURL else {
+            drainSharedInbox()
+            return
+        }
         let documents = documentsURL
         if url.path.hasPrefix(documents.appendingPathComponent("Inbox").path + "/") {
             drainSharedInbox()

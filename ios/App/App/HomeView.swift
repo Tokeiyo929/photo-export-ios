@@ -66,6 +66,14 @@ struct HomeView: View {
                      ? "收件箱还有 \(state.sharePending) 项待登记（点「立即登记」或重开 App）"
                      : "收件箱已清空")
                     .font(.subheadline)
+                Text("主 App 容器：\(state.shareGroup.isEmpty ? "未定位" : state.shareGroup)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                if !state.shareDiag.isEmpty {
+                    Text(state.shareDiag)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                 if !state.shareLastLine.isEmpty {
                     Text(state.shareLastLine)
                         .font(.footnote)

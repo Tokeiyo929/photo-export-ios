@@ -19,6 +19,8 @@ class ShareViewController: UIViewController {
     private var total = 0
     /// 只在主线程读写；超时后到达的回调全部弃单
     private var finished = false
+    /// open 回调是否已处理（成功/失败/超时只收尾一次）
+    private var openResolved = false
     private let lock = NSLock()
 
     override func viewDidLoad() {
@@ -215,13 +217,50 @@ class ShareViewController: UIViewController {
         SharedGroup.appendLog("EXT done received=\(received) fellBack=\(fellBack)")
         spinner.stopAnimating()
         if received > 0 {
-            let alert = UIAlertController(title: "已接收 \(received) 个文件",
-                                          message: fellBack > 0 ? "其中 \(fellBack) 个走了降级通道（详见主 App 记录）" : "原片字节已保存，打开主 App 完成登记",
-                                          preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "好", style: .default) { [weak self] _ in self?.done() })
-            present(alert, animated: true)
+            // 分享完直接拉起主 App：extensionContext.open 在分享扩展上不是官方保证
+            // （Apple 论坛 27295：Share Extension 不允许 open URL），先尽力试——
+            // 成功用户直接进 App 自动登记；被系统拒了才退回弹窗指路。
+            openHostApp(fallback: { [weak self] in
+                guard let self else { return }
+                let container = SharedGroup.resolvedGroupName.isEmpty ? "未定位" : SharedGroup.resolvedGroupName
+                let alert = UIAlertController(
+                    title: "已接收 \(self.received) 个文件",
+                    message: (self.fellBack > 0 ? "其中 \(self.fellBack) 个走了降级通道（详见主 App 记录）。" : "")
+                        + "原片字节已保存（容器 \(container)），回桌面打开主 App 完成登记。\n\n"
+                        + "想一步到位：下次分享时点 App 行里的「照片无损导出」图标（直投通道，系统会直接打开 App）。",
+                    preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "好", style: .default) { [weak self] _ in self?.done() })
+                self.present(alert, animated: true)
+            })
         } else {
             fail("没有收到文件", detail: nil)
+        }
+    }
+
+    /// 尽力拉起主 App（photoexport://shared）：主 App 收到即扫收件箱登记。
+    /// 2 秒没回调也要收尾（个别系统版本 open 回调不来，否则扩展界面挂死）。
+    private func openHostApp(fallback: @escaping () -> Void) {
+        guard let url = URL(string: "photoexport://shared") else { fallback(); return }
+        openResolved = false
+        extensionContext?.open(url) { [weak self] opened in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard !self.openResolved else { return }
+                self.openResolved = true
+                if opened {
+                    SharedGroup.appendLog("EXT opened host app")
+                    self.done()
+                } else {
+                    SharedGroup.appendLog("EXT open host app refused")
+                    fallback()
+                }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, !self.openResolved else { return }
+            self.openResolved = true
+            SharedGroup.appendLog("EXT open host app no callback")
+            fallback()
         }
     }
 

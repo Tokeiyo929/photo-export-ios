@@ -66,6 +66,11 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # 分享扩展登记完尽力拉起主 App（photoexport://shared）；系统拒绝时退回弹窗
+        CFBundleURLTypes:
+          - CFBundleURLName: com.tokeiyo929.photoexport
+            CFBundleURLSchemes:
+              - photoexport
         # 「分享面板直投」通道：相册分享 → App 行点「无损导出」时系统把原文件拷进
         # Documents/Inbox 再拉起 App（不走 App Group，免费签名也能用）。
         CFBundleDocumentTypes:
