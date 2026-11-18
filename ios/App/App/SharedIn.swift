@@ -48,7 +48,9 @@ enum SharedIn {
             lastDiagnostics = "容器未定位：\(SharedGroup.lastProbeDescription)"
             return DrainResult()
         }
-        try? fm.removeItem(at: SharedGroup.queueURL())
+        if let queue = SharedGroup.queueURL() {
+            try? fm.removeItem(at: queue)
+        }
         let names = ((try? fm.contentsOfDirectory(at: inbox, includingPropertiesForKeys: nil)) ?? [])
             .filter { !$0.hasDirectoryPath && !$0.lastPathComponent.hasPrefix(".") }
             .map(\.lastPathComponent)

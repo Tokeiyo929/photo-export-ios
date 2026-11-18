@@ -56,7 +56,7 @@ enum AppStorage {
         if fm.fileExists(atPath: oldManifest.path) {
             let stamp = Int(Date().timeIntervalSince1970)
             try? fm.moveItem(at: oldManifest,
-                             to: logsDirectory(store).appendingPathComponent("manifest-archive-\(stamp).csv"))
+                             to: SharedIn.logsDirectory(store).appendingPathComponent("manifest-archive-\(stamp).csv"))
             moved.append("manifest.csv(归档)")
         }
         if !moved.isEmpty {

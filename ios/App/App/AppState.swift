@@ -261,7 +261,7 @@ final class AppState: ObservableObject {
             }
             Self.lastScanAt = Date()
             scan.scanned = true
-            try? indexLines.joined(separator: "\n").data(using: .utf8)
+            try? Data(indexLines.joined(separator: "\n").utf8)
                 .write(to: AppStorage.indexURL, options: .atomic)
             DispatchQueue.main.async {
                 guard let self else { return }
