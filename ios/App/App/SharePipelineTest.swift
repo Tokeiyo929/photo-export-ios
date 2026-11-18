@@ -63,6 +63,7 @@ enum SharePipelineTest {
         }
 
         record("导入链路: 导入夹与根散落文件全部入暂存") {
+            try fm.createDirectory(at: ctx.docs.appendingPathComponent("导入"), withIntermediateDirectories: true)
             try Data(repeating: 0x11, count: 256).write(to: ctx.docs.appendingPathComponent("导入").appendingPathComponent("A_9001.JPG"))
             try Data(repeating: 0x22, count: 256).write(to: ctx.docs.appendingPathComponent("B_9002.jpg"))
             let n = SharedIn.drainImportFolder(documentsURL: ctx.docs, storeURL: ctx.docs).imported
