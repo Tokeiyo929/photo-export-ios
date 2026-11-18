@@ -204,6 +204,15 @@ def index_by_basename(rows) -> dict:
     return index
 
 
+def compare_baseline_rows(listing_kind: str, rows, report: list) -> list:
+    """原图对照的哈希基线行。manifest 模式用手机端哈希；
+    index 模式（v4 无手机端基线）用本次拉取现算留档的哈希（PASS/SKIP-VERIFIED 行）。"""
+    if listing_kind == "manifest":
+        return pe_common.last_wins(rows)
+    return [pe_common.ManifestRow(relative_path=r["relative_path"], sha256=r["actual_sha256"])
+            for r in report if r["result"] in ("PASS", "SKIP-VERIFIED")]
+
+
 def wifi_pull(args: argparse.Namespace) -> int:
     base = (args.wifi or "").strip()
     if not base or base.lower() in ("discover", "auto"):
@@ -323,6 +332,7 @@ async def amain(args: argparse.Namespace) -> int:
     lockdown = await create_using_usbmux(serial=args.udid)
     pe_common.log(f"已连接：{lockdown.short_info.get('DeviceName', '?')} "
                   f"iOS {lockdown.short_info.get('ProductVersion', '?')}")
+    pe_common.log("枚举已装 App（解析重签后缀，个别系统这步要几秒）…")
 
     # 解析实际 bundle id：Sideloadly 免签重签会在原 id 后追加团队后缀
     # （如 com.tokeiyo929.photoexport.FBTKZ8C6QB），先精确匹配再前缀匹配。
@@ -384,14 +394,26 @@ async def amain(args: argparse.Namespace) -> int:
     # v3 布局（2026-11-17）：App 内部文件住 Library/Application Support/PhotoExport（文件 App
     # 不可见），旧布局住 Documents 根。VendDocuments 只够得着 Documents（旧布局）；
     # VendContainer 整容器两种都行——所以先 VendDocuments，不行退 VendContainer 挨个试。
+    # v4 传送带：手机端没有账本，枚举靠 App 实测重建的 index.txt（size\t相对路径，按名读
+    # 不受「列目录 PERM_DENIED」限制）；旧版手机仍在的话退回 manifest.csv（哈希校验更全）。
     APP_SUPPORT = "Library/Application Support/PhotoExport"
-    offset = ""   # AFC 根偏移：VendDocuments 根就是 Documents；VendContainer 根是容器
-    base = ""     # App 内部文件区前缀：旧布局 Documents 根（""），v3 布局 App Support
-    manifest_bytes = None
-    try:
-        manifest_bytes = await house.get_file_contents(pe_common.MANIFEST_NAME)
-    except Exception as error:
-        pe_common.log(f"VendDocuments 视图读不到 manifest.csv：{error}")
+    offset = ""        # AFC 根偏移：VendDocuments 根就是 Documents；VendContainer 根是容器
+    base = ""          # App 内部文件区前缀：旧布局 Documents 根（""），v3+ 布局 App Support
+    listing_bytes: bytes | None = None
+    listing_kind = ""  # "index"（v4）或 "manifest"（旧版）
+    last_error: Exception | None = None
+
+    # 第一轮 VendDocuments：只够得着 Documents 根（旧布局）
+    for kind, name in [("index", pe_common.INDEX_NAME), ("manifest", pe_common.MANIFEST_NAME)]:
+        try:
+            listing_bytes = await house.get_file_contents(name)
+            listing_kind = kind
+            base = ""
+            break
+        except Exception as error:
+            last_error = error
+    if listing_bytes is None:
+        pe_common.log(f"VendDocuments 视图读不到 index/manifest：{last_error}")
         pe_common.log("退回 VendContainer（整容器）再试——iOS 27 两种 vend 命令的容器映射可能不同。")
         try:
             await house.close()
@@ -399,20 +421,25 @@ async def amain(args: argparse.Namespace) -> int:
             pass
         house = await HouseArrestService.create(lockdown, bundle, documents_only=False)
         offset = "Documents"
-        for cand_base, label in [("", "Documents 根（旧布局）"),
-                                 (APP_SUPPORT, "Application Support（v3 布局）")]:
-            parts = [p for p in [offset, cand_base, pe_common.MANIFEST_NAME] if p]
-            try:
-                manifest_bytes = await house.get_file_contents("/".join(parts))
-                base = cand_base
-                pe_common.log(f"VendContainer 命中：{label}——数据线走整容器模式。")
+        for kind, name in [("index", pe_common.INDEX_NAME), ("manifest", pe_common.MANIFEST_NAME)]:
+            for cand_base, label in [(APP_SUPPORT, "Application Support（v3+/v4 布局）"),
+                                     ("", "Documents 根（旧布局）")]:
+                parts = [p for p in [offset, cand_base, name] if p]
+                try:
+                    listing_bytes = await house.get_file_contents("/".join(parts))
+                    listing_kind = kind
+                    base = cand_base
+                    pe_common.log(f"VendContainer 命中 {kind}：{label}——数据线走整容器模式。")
+                    break
+                except Exception as error2:
+                    last_error = error2
+            if listing_bytes is not None:
                 break
-            except Exception as error2:
-                pe_common.log(f"VendContainer {label} 读不到 manifest.csv：{error2}")
-        if manifest_bytes is None:
-            pe_common.log("两种 vend、新旧布局都读不到 manifest.csv。")
-            pe_common.log("请确认 App 已在手机上跑过一次（登记过至少一张照片），bundle id 是否正确（--app）。")
-            return 2
+    if listing_bytes is None:
+        pe_common.log(f"两种 vend 都读不到 index.txt / manifest.csv（{last_error}）。")
+        pe_common.log("请先在手机上打开一次本 App（它会自动搬运照片并生成清单），再重拉；")
+        pe_common.log("若 App 侧显示「已入暂存」仍拉不到，截图 App 首页诊断行排查。")
+        return 2
 
     def rooted(rel: str) -> str:
         """App 内部文件区相对路径 → AFC 会话里的实际路径。"""
@@ -436,15 +463,22 @@ async def amain(args: argparse.Namespace) -> int:
         target = dest / f"device-{diag.rsplit('/', 1)[-1]}"
         target.write_bytes(data)
         pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
-    rows, malformed = pe_common.parse_manifest_bytes(manifest_bytes)
-    # 清单落盘到 --dest：无损证明链的根（verify.py 复验、查某张照片的哈希都靠它）
-    (dest / pe_common.MANIFEST_NAME).write_bytes(manifest_bytes)
-    expected = pe_common.pullable_rows(rows)
+    malformed = 0
     pulled_note = ""
-    if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
-        pulled_note = "（PULLED 的已拉取清理，跳过）"
-    pe_common.log(f"清单：待拉取 {len(expected)} 个文件{pulled_note}"
-                  + (f"，损坏行 {malformed}" if malformed else ""))
+    if listing_kind == "manifest":
+        rows, malformed = pe_common.parse_manifest_bytes(listing_bytes)
+        # 清单落盘到 --dest：无损证明链的根（verify.py 复验、查某张照片的哈希都靠它）
+        (dest / pe_common.MANIFEST_NAME).write_bytes(listing_bytes)
+        expected = pe_common.pullable_rows(rows)
+        if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
+            pulled_note = "（PULLED 的已拉取清理，跳过）"
+        pe_common.log(f"清单：待拉取 {len(expected)} 个文件{pulled_note}"
+                      + (f"，损坏行 {malformed}" if malformed else ""))
+    else:
+        rows = []  # index 模式无手机端哈希行；对照基线改用拉取时现算的哈希
+        expected = pe_common.rows_from_index(listing_bytes)
+        (dest / "index.txt").write_bytes(listing_bytes)
+        pe_common.log(f"暂存区清单（index.txt，v4 传送带）：待拉取 {len(expected)} 个文件（哈希拉取时在电脑端现算）")
 
     # 2) 枚举设备端文件（顺带发现清单之外的孤儿文件）
     # iOS 27 真机实测：AFC 对第三方沙盒「按名读可以，列目录 PERM_DENIED」，
@@ -479,8 +513,12 @@ async def amain(args: argparse.Namespace) -> int:
     except Exception as error:
         pe_common.log(f"设备端文件枚举失败（跳过孤儿检测）：{error}")
     known = {r.relative_path for r in expected}
-    orphans = [p for p in device_files
-               if p != pe_common.MANIFEST_NAME and p not in known and p not in diagnostics]
+    # 孤儿=清单外文件。诊断日志与 index/manifest 本身是内部文件，不算孤儿
+    # （键已剥掉 offset/base 前缀，与上面 diag 落 dest 的 device-* 文件一一对应）。
+    diag_rels = {"logs/export-log.txt", "logs/export-log.old.txt",
+                 "export-log.txt", "export-log.old.txt"}
+    internal_names = diag_rels | {pe_common.MANIFEST_NAME, pe_common.INDEX_NAME}
+    orphans = [p for p in device_files if p not in known and p not in internal_names]
     if orphans and not args.compare_orphans:
         pe_common.log(f"警告：设备上有 {len(orphans)} 个清单外文件（可能是上次失败残留），已跳过不拉。")
 
@@ -495,6 +533,15 @@ async def amain(args: argparse.Namespace) -> int:
         prefix = f"[{done}/{len(expected)}]"
         # 续跑：本地已有且大小一致（--fast-resume 直接认；默认再验哈希）
         if target.exists() and target.stat().st_size == row.size:
+            dest_sha = pe_common.sha256_file(target)
+            if not row.sha256:
+                # index 模式没有手机端哈希基线：同大小即认，PC 端哈希照样入报告留档
+                summary.skipped_verified += 1
+                summary.total_bytes += row.size
+                report.append(pe_common._report_row(rel, dest_sha, dest_sha, row.size,
+                                                    "SKIP-VERIFIED", "同大小（无手机端哈希基线）"))
+                pe_common.log(f"{prefix} SKIP  {rel}")
+                continue
             if args.fast_resume:
                 summary.skipped_verified += 1
                 summary.total_bytes += row.size
@@ -502,10 +549,10 @@ async def amain(args: argparse.Namespace) -> int:
                                                     "SKIP-VERIFIED", "同大小，未重算哈希"))
                 pe_common.log(f"{prefix} SKIP  {rel}")
                 continue
-            if pe_common.sha256_file(target) == row.sha256:
+            if dest_sha == row.sha256:
                 summary.skipped_verified += 1
                 summary.total_bytes += row.size
-                report.append(pe_common._report_row(rel, row.sha256, row.sha256, row.size,
+                report.append(pe_common._report_row(rel, row.sha256, dest_sha, row.size,
                                                     "SKIP-VERIFIED", "已存在且哈希一致"))
                 pe_common.log(f"{prefix} SKIP  {rel}")
                 continue
@@ -520,15 +567,16 @@ async def amain(args: argparse.Namespace) -> int:
             continue
         actual_sha = pe_common.sha256_file(target)
         actual_size = target.stat().st_size
-        if actual_size != row.size or actual_sha != row.sha256:
+        if actual_size != row.size or (row.sha256 and actual_sha != row.sha256):
             summary.failed += 1
             report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "FAIL",
-                                                "拉取后哈希不一致"))
+                                                "拉取后大小/哈希不一致"))
             pe_common.log(f"{prefix} FAIL  {rel}")
         else:
             summary.passed += 1
             summary.total_bytes += actual_size
-            report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "PASS", ""))
+            # index 模式没有手机端基线：以电脑端现算哈希为准记录在案（后续重拉可比对）
+            report.append(pe_common._report_row(rel, row.sha256 or actual_sha, actual_sha, actual_size, "PASS", ""))
             pe_common.log(f"{prefix} PASS  {rel}  ({pe_common.bytes_str(actual_size)})")
 
     # 3.5) 原图对照（独立裁判）：用户在相册 App 用系统自带「导出未修改的原片」分享到
@@ -557,8 +605,8 @@ async def amain(args: argparse.Namespace) -> int:
                 await house.pull(rooted(rel), str(sub))
             except Exception as error:
                 pe_common.log(f"[对照] {base} 拉取失败：{error}")
-        # 对照：basename 匹配清单行 → 哈希比对（含 PULLED/FAIL 行——对照不限状态）
-        by_base = index_by_basename(pe_common.last_wins(rows))
+        # 对照：basename 匹配基线行 → 哈希比对（manifest 含 PULLED/FAIL 行——对照不限状态）
+        by_base = index_by_basename(compare_baseline_rows(listing_kind, rows, report))
         verified = mismatched = unmatched = 0
         for path in sorted(compare_dir.rglob("*")):
             if not path.is_file():

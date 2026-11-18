@@ -1,6 +1,6 @@
 # 照片无损导出（Photo Export）
 
-把 iPhone 相册**零质量损失**搬到电脑的专用工具：在相册里选中照片 → 分享 → **存储到文件** → 本 App 的「导入」文件夹 → 原片字节按拍摄日期归档 → 数据线拉到电脑逐文件哈希验证。主通道是**文件夹导入**（系统递原始字节，Live 图=HEIC+MOV 成对）；分享扩展是备选。
+把 iPhone 相册**零质量损失**搬到电脑的专用工具：在相册里选中照片 → 分享 → **存储到文件** → 本 App 的「导入」文件夹 → 原片字节按拍摄日期归档进暂存区 → 数据线拉到电脑逐文件算哈希留档。手机端只是**传送带**：拉完清空归零，不算哈希、不留账本。主通道是**文件夹导入**（系统递原始字节，Live 图=HEIC+MOV 成对）；分享扩展是备选。
 
 ## 它解决什么问题
 
@@ -17,42 +17,43 @@
 
 ## 功能（单页 App：文件夹导入为主）
 
-- **文件夹导入（主通道）**：相册选片 → 分享 → **存储到文件** → 「我的 iPhone」→「照片无损导出」→ **「导入」**→ 回 App 点「立即登记」。系统在这条链上递的是**原始字节**（对照实验实锤 `IMG_xxxx.HEIC` 字节一致），Live 图=HEIC+MOV 成对入库。存错层级也没事——Documents 根的散落文件同样会被收。同一张照片重复导入会按「内容哈希+文件名」自动跳过，卡片写明数量。
+- **文件夹导入（主通道）**：相册选片 → 分享 → **存储到文件** → 「我的 iPhone」→「照片无损导出」→ **「导入」**→ 回 App 点「立即导入」（回前台也会自动搬）。系统在这条链上递的是**原始字节**（对照实验实锤 `IMG_xxxx.HEIC` 字节一致），Live 图=HEIC+MOV 成对入库。导入 = **纯移动**进暂存区 `photos/日期/`（零哈希零账本，秒级完成）；存错层级也没事——「导入」夹、直投 Inbox、扩展收件箱三条通道一次全收。同名不覆盖（防撞名自动改名）。
   - **为什么不用分享扩展当主通道**：分享扩展里系统对 Live 图只递转码后的 JPEG（视频半边不给），字节级无损做不到源头。文件夹导入是系统自己的原片出口，无损从第一步就成立。
-  - **备选通道**（都会汇入同一条登记链）：分享面板 App 行点「照片无损导出」图标（直投，免签也能用）；分享扩展按钮（Live 图仍会变 JPEG，仅普通照片无损）。
+  - **备选通道**（都会汇入同一条导入链）：分享面板 App 行点「照片无损导出」图标（直投，免签也能用）；分享扩展按钮（Live 图仍会变 JPEG，仅普通照片无损）。
   - **直投兜底通道**：分享面板的 App 行点 **「照片无损导出」**图标，系统把原文件拷进 `Documents/Inbox` 再拉起 App——这条路不依赖 App Group，任何签名方式都通（来源标「分享直投」）。分享扩展依赖 App Group，免费 Apple ID 重签时组权限经常注册不上（Sideloadly 免费版不给 Custom Entitlements），走这条即可。
-  - **分享完能否直接跳回 App**：分享扩展主动拉起宿主 App 不是 Apple 保证的能力（论坛 27295）。本版登记完会先用 `photoexport://shared` **尽力尝试拉起**，系统放行就直接进 App 自动登记；被拒才弹窗提示手动打开。真想一步到位，走上面的 App 行直投通道最稳。
-  - **导入没反应怎么查**：首页「分享导入」卡片现在直接显示主 App 落到的组名、队列行数/解析条数、收件箱文件数、登记/跳过/失败数和首个错误——拍一张卡片的图就能定位是「扩展写进了另一个容器」还是「文件搬不动」。
-  - **一次分享几百张**：扩展同时只向系统要 4 个文件（257 个一起要会被系统节流），逐件落盘记账；扩展会尽力关掉自动锁屏（结果写 `EXT idle-timer` 日志），但扩展进程不保证有 UIApplication 权限——**息屏后系统会挂起扩展、交接暂停**，所以大批量时请保持亮屏（或把「自动锁定」调长）。旧版 90 秒超时会把迟到的文件全丢掉（257 张只登记 145 张的根因），现在超时只提示、不弃单，解锁后继续收完。收尾弹窗如实报数：若系统只交出了选中项的一部分（进程被杀/被取消），会写明「缺的 N 项没到手」。
-  - **Live 图（实况）**：走 `PHLivePhoto → PHAssetResource` 原始资源对（Proton Drive/Nextcloud 同款）——每张 Live 登记**两个文件**：`IMG_xxxx.HEIC` 原图 + `IMG_xxxx.MOV` Live 视频，都是原始字节（iCloud 原片自动下载）。所以「分享 100 张 Live」清单里是 200 行，卡片会写明。普通照片仍走文件通道字节级复制。
-- **清理已拉取**：电脑端校验全 PASS 后一键删手机端文件腾空间，清单改记 PULLED（哈希保留，证明链不断）。
+  - **分享完能否直接跳回 App**：分享扩展主动拉起宿主 App 不是 Apple 保证的能力（论坛 27295）。本版收完会先用 `photoexport://shared` **尽力尝试拉起**，系统放行就直接进 App 自动导入；被拒才弹窗提示手动打开。真想一步到位，走上面的 App 行直投通道最稳。
+  - **导入没反应怎么查**：首页「分享导入」卡片直接显示主 App 落到的组名、收件箱文件数、已入暂存/失败数和首个错误——拍一张卡片的图就能定位是「扩展写进了另一个容器」还是「文件搬不动」。
+  - **一次分享几百张**：扩展同时只向系统要 4 个文件（257 个一起要会被系统节流），逐件落盘；扩展会尽力关掉自动锁屏（结果写 `EXT idle-timer` 日志），但扩展进程不保证有 UIApplication 权限——**息屏后系统会挂起扩展、交接暂停**，所以大批量时请保持亮屏（或把「自动锁定」调长）。旧版 90 秒超时会把迟到的文件全丢掉（257 张只收到 145 张的根因），现在超时只提示、不弃单，解锁后继续收完。收尾弹窗如实报数：若系统只交出了选中项的一部分（进程被杀/被取消），会写明「缺的 N 项没到手」。
+  - **Live 图（实况）**：走 `PHLivePhoto → PHAssetResource` 原始资源对（Proton Drive/Nextcloud 同款）——每张 Live 收**两个文件**：`IMG_xxxx.HEIC` 原图 + `IMG_xxxx.MOV` Live 视频，都是原始字节（iCloud 原片自动下载）。所以「分享 100 张 Live」到暂存区是 200 个文件。普通照片仍走文件通道字节级复制。
+- **清空暂存区**：电脑端拉取全 PASS 后，App 里一键清空归零。确认弹窗写明红线：先确认电脑端已校验再删——删除后手机端不再有这些照片，全部哈希记录在电脑端 `export-report.csv`。
 
-**无损边界**：登记的是系统从相册递出的**原片字节**（分享扩展按 Nextcloud 同款 `copyItem` 字节级复制，不碰 `PHImageManager` 的渲染图；只在系统只给位图的极罕见情况下降级并在 note 如实标注重编码）。Live 图取 `.photo`/`.pairedVideo` 资源的原始字节。归档目录按拍摄时间：图片读 EXIF、视频读 QuickTime creationDate，都没有则退文件时间。
+**无损边界**：App 全程只做**字节级移动**——「导入」夹里是什么字节，暂存区里就是什么字节，不算哈希、不转码、不写清单（分享扩展通道按 Nextcloud 同款 `copyItem` 字节级复制，不碰 `PHImageManager` 的渲染图）。归档目录按拍摄时间：图片读 EXIF、视频读 QuickTime creationDate，都没有则退文件时间。
 
 ## 可证明的无损链路
 
 ```
-设备内：分享扩展 copyItem 原始字节 → App Group 收件箱落盘 → 主 App 登记时算 SHA-256
-        → 按拍摄日期归档进 Documents → manifest.csv 记 OK 行（搬不动 = 留在收件箱下轮再试）
-数据线：pull.py 拉取 → 逐文件重算 SHA-256 对照 manifest → export-report.csv（固定名，每次覆盖）
+手机端（传送带，零账本）：相册 → 存储到文件「导入」→ App 移动进暂存区 photos/日期/（字节不动，秒级）
+电脑端：pull.py 按 index.txt 逐文件拉取 → 现算 SHA-256 落 export-report.csv（固定名，每次覆盖）
         └─ 全 PASS 退出码 0；任何 FAIL/MISSING 退出码 1
 ```
 
-`manifest.csv`（UTF-8 BOM，Excel 可直接开）就是断点续跑状态，追加式日志、同路径后行覆盖前行，列：
+v4 起手机端**没有账本**（旧 manifest.csv 已归档进 logs/，电脑端历史副本仍在）。取代它的是：
 
-```
-relative_path,size,sha256,date_source,asset_id,media_type,favorite,status,exported_at,note
-```
+- **`index.txt`**：暂存区文件清单（UTF-8，一行 `大小<TAB>相对路径`），App 每次占用统计时全树实测重建——崩溃自愈、清空后为空。iOS 27 上 AFC「列目录被拒、按名读可以」，电脑端靠它枚举待拉文件
+- **`export-report.csv`**：拉取时电脑端逐文件现算的 SHA-256 **留档**，后续任何时候可重验/比对
+- **断点续跑**：中断后重跑同一条命令，本地已有且同大小的文件自动跳过（`--fast-resume` 连哈希都不重算）
+
+为什么手机端不算哈希：实测清单哈希对账证明的只是「传输没坏」，从未拦住真正的丢失——Live 图被系统转成 JPEG 时，清单如实记了 JPEG 的哈希，两边一致照样全 PASS；代价却是每个大文件几十秒的手机端哈希等待和整套状态机。「文件是否真与相册一致」由对照实验实锤（下文 `--compare-orphans`）。
 
 ## 构建（GitHub Actions → 未签名 IPA → Sideloadly）
 
 与 U盘医生/MyFood 相同的流水线：推送到 `master` 后 Actions 在 macOS 上完成
 
-1. PC 端 unittest（manifest 解析/校验/仅存储 ZIP，纯标准库）
+1. PC 端 unittest（manifest/index 两种清单的解析与校验、对照基线、仅存储 ZIP，纯标准库）
 2. `xcodegen generate` 生成 Xcode 工程（工程文件不入库，由 `ios/App/project.yml` 描述）
 3. `xcodebuild CODE_SIGNING_ALLOWED=NO` 构建**未签名设备 IPA**
 4. `swiftc` 编译并运行核心隔离回归（`ExportPlanner`/`FileHasher`/`ManifestStore`/`TestSupport` + `tests/CoreTests.swift`）
-5. 构建 Debug 模拟器包，`-autoSmoke` 四页巡访截图（含真实分享导入链路：投喂收件箱 → drain 登记）、`-autoTest` 应用内自测
+5. 构建 Debug 模拟器包，`-autoSmoke` 四页巡访截图（含真实分享导入链路：投喂收件箱 → drain 入暂存区）、`-autoTest` 应用内自测
 6. 上传 artifact 并把 IPA 发布到 Release
 
 安装（两条路，按需要的功能选）：
@@ -64,7 +65,7 @@ relative_path,size,sha256,date_source,asset_id,media_type,favorite,status,export
 
 ## PC 端：拉取路径
 
-App 已开启 iTunes 文件共享（`UIFileSharingEnabled`）。目录布局（v3，2026-11-17）：**文件 App 里只看得到「导入」文件夹**（+ 系统直投用过的 `Inbox/`）；照片归档 `photos/`、清单 `manifest.csv`、内部日志 `logs/` 全部住 `Library/Application Support/PhotoExport/`（文件 App 不可见）。拉取脚本自动发现新旧两种布局。
+App 已开启 iTunes 文件共享（`UIFileSharingEnabled`）。目录布局（v4，2026-11-18）：**文件 App 里只看得到「导入」文件夹**（+ 系统直投用过的 `Inbox/`）；暂存区 `photos/`、清单 `index.txt`、内部日志 `logs/` 全部住 `Library/Application Support/PhotoExport/`（文件 App 不可见）。拉取脚本自动发现新旧两种布局、两种清单（`index.txt`=v4 传送带 / `manifest.csv`=旧版，后者哈希对账更全）。
 懒得记命令就双击仓库根目录的 **拉取.bat**（菜单选数据线或原图对照，参数可通过命令行尾追加，如 `拉取.bat --zip`）。
 
 ### 方式 A：数据线脚本（推荐）
@@ -79,24 +80,24 @@ python pc/pull.py --dest D:\相册导出 --zip    # 全 PASS 后顺手打仅存�
 ```
 
 - 中断（拔线/断电）后**重跑同一条命令即续跑**，已验证文件自动跳过；`--fast-resume` 连哈希都不重算（快，但少一道证明）
-- 手机上要先登记过至少一次分享，`Documents/manifest.csv` 存在才能拉
+- 手机上要先导入过：暂存区有文件、且 App 启动过一次（`index.txt` 由占用统计实测重建）。旧版手机没有 index.txt 时自动退回 manifest.csv
 
 **真原图证明（双路对照，给不放心的人）**：App 导出与相册「导出未修改的原片」背后是**同一个** PhotoKit 原始资源 API（`PHAssetResource` 的 `.photo`/`.video`，编辑版 `.fullSizePhoto` 两边都不碰）——但空口无凭，对出证据来：
 
 1. 手机相册挑 2-3 张**未编辑过**的照片（HEIC/JPG/实况各一最好）→ 分享 → **存储到文件** → 「我的 iPhone」→ 照片无损导出
-2. 数据线跑 `python pc/pull.py --dest 目标目录 --compare-orphans`（这些系统导出的文件会进 `_原图对照/` 并自动与清单哈希逐个比对）
+2. 数据线跑 `python pc/pull.py --dest 目标目录 --compare-orphans`（这些系统导出的文件会进 `_原图对照/`，并自动与已拉文件的哈希逐个比对——manifest 模式用手机端哈希、index 模式用拉取时现算留档的哈希）
 3. `[对照] IMG_xxxx.HEIC ↔ ... PASS（字节一致）` = 系统 UI 导出的字节和我们导出的字节**完全相同**，真原图实锤
 
 ### 方式 B：爱思助手/iMazing 手动导出 + 校验兜底
 
-在爱思助手「应用游戏 → 本机应用 → 文件共享」（或 iMazing）把 App 的 `Documents/` 整个拖出来，然后：
+用 iMazing（或爱思助手的容器浏览）进 App 沙盒的 `Library/Application Support/PhotoExport/`，把 **`photos/` 和 `index.txt`** 一起拖出来（旧版 App 才是拖 `Documents/`，里面有 `manifest.csv`），然后：
 
 ```sh
-python pc/verify.py D:\相册导出            # 对 manifest 全量哈希校验
+python pc/verify.py D:\相册导出            # 清单自动探测：manifest 对照手机端哈希；index 查大小+电脑现算哈希留档
 python pc/verify.py D:\相册导出 --zip
 ```
 
-脚本跑不通时这条是兜底；校验逻辑与方式 A 完全一致。
+脚本跑不通时这条是兜底；校验逻辑与方式 A 同源。
 
 ### 方式 C：传输护甲（微信传大包）
 
@@ -125,9 +126,9 @@ PC 端测试（Windows 即可真跑）：`python -m unittest discover -s pc -p '
 
 ## 真机验收清单
 
-1. 装好 App（SideStore/Sideloadly，见上文）→ 相册选 10 张照片 → 分享 → 「无损导出」
-2. 回 App：卡片显示「已登记 10 项」（重复分享同一批会显示跳过数量）
-3. 数据线连电脑，`python pc/pull.py --dest D:\试导出` → 全 PASS（报 OBJECT_NOT_FOUND 就走方式 B：爱思助手/iMazing 手动导出）
-4. 抽 1 张人工抽查：`certutil -hashfile 文件 SHA256` 与 manifest.csv 里那行一致
+1. 装好 App（SideStore/Sideloadly，见上文）→ 相册选 10 张照片 → 分享 → **存储到文件** →「导入」夹
+2. 回 App 点「立即导入」：卡片显示「已入暂存 10 个文件，等电脑拉取」（重复分享同一批会看到防撞名改名的新文件）
+3. 数据线连电脑，`python pc/pull.py --dest D:\试导出` → 全 PASS（报 OBJECT_NOT_FOUND 就走方式 B：iMazing/爱思助手进容器拖 `photos/`+`index.txt`）
+4. 抽 1 张人工抽查：`certutil -hashfile 文件 SHA256` 与 export-report.csv 里那行一致
 5. `--zip` 后微信把 zip 发给自己，PC 解压再 `verify.py` 通过
 6. 大批量（几百张）：保持亮屏（扩展会尽力关自动锁屏）；中途息屏也不丢——解锁后扩展继续收，超时只提示不弃单

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 MANIFEST_NAME = "manifest.csv"
+INDEX_NAME = "index.txt"
 MANIFEST_HEADER = ["relative_path", "size", "sha256", "date_source", "asset_id",
                    "media_type", "favorite", "status", "exported_at", "note"]
 CHUNK = 1024 * 1024
@@ -107,6 +108,21 @@ def pullable_rows(rows: Iterable[ManifestRow]) -> List[ManifestRow]:
     return [r for r in last_wins(rows) if r.status == "OK"]
 
 
+def rows_from_index(raw: bytes) -> List[ManifestRow]:
+    """v4 传送带的暂存区清单：index.txt 一行 `size<TAB>relative_path`。
+    无哈希无状态——哈希在拉取时由 PC 端现算并落报告。坏行跳过。"""
+    rows: List[ManifestRow] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or "\t" not in line:
+            continue
+        size_text, rel = line.split("\t", 1)
+        if not size_text.isdigit() or not rel.strip():
+            continue
+        rows.append(ManifestRow(relative_path=rel.strip(), size=int(size_text)))
+    return rows
+
+
 def local_path(folder: Path, relative_path: str) -> Path:
     """清单里用 '/' 分隔；Windows 上 join 回本地分隔符。"""
     parts = [p for p in relative_path.split("/") if p not in ("", ".")]
@@ -179,6 +195,57 @@ def verify_folder(folder: Path, manifest_path: Optional[Path] = None,
                                       "磁盘存在但清单未记录"))
     if malformed:
         log(f"警告：清单损坏行 {malformed} 条（已跳过）")
+    return report, summary
+
+
+def verify_folder_index(folder: Path, index_path: Optional[Path] = None,
+                        progress=None) -> Tuple[List[dict], VerifySummary]:
+    """v4 传送带目录校验：手机端没有哈希账本，基线只有 index.txt 的「大小+相对路径」。
+    逐文件查存在+大小，SHA-256 由电脑现算（expected=actual 一并落报告，作为留档基线）。
+    result: PASS（大小符+哈希已留档）/ FAIL / MISSING / EXTRA。
+    「传输没坏」的强证明仍由 pull 时现算哈希与 --compare-orphans 原图对照承担。"""
+    index_path = index_path or folder / INDEX_NAME
+    summary = VerifySummary()
+    report: List[dict] = []
+    if not index_path.exists():
+        summary.failed = 1
+        report.append(_report_row(INDEX_NAME, "", "", 0, "MISSING",
+                                  "index.txt 不存在：" + str(index_path)))
+        return report, summary
+    expected = {r.relative_path: r for r in rows_from_index(index_path.read_bytes())}
+    for relative_path, row in expected.items():
+        target = local_path(folder, relative_path)
+        if not target.exists():
+            summary.missing += 1
+            report.append(_report_row(relative_path, "", "", row.size, "MISSING", "文件不存在"))
+            if progress:
+                progress(relative_path, "MISSING")
+            continue
+        actual_size = target.stat().st_size
+        if row.size and actual_size != row.size:
+            summary.failed += 1
+            report.append(_report_row(relative_path, "", "", actual_size, "FAIL",
+                                      f"大小不符 index={row.size} 实际={actual_size}"))
+            if progress:
+                progress(relative_path, "FAIL")
+            continue
+        actual_sha = sha256_file(target)
+        summary.passed += 1
+        summary.total_bytes += actual_size
+        report.append(_report_row(relative_path, actual_sha, actual_sha, actual_size, "PASS",
+                                  "v4 无手机端哈希基线，电脑端现算留档"))
+        if progress:
+            progress(relative_path, "PASS")
+    # 磁盘上多出来的文件（index 没记的）：index.txt/manifest.csv/报告自身不算
+    skip_names = {INDEX_NAME, MANIFEST_NAME, "export-report.csv"}
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file() or path.name in skip_names:
+            continue
+        relative = path.relative_to(folder).as_posix()
+        if relative not in expected:
+            summary.extra += 1
+            report.append(_report_row(relative, "", "", path.stat().st_size, "EXTRA",
+                                      "磁盘存在但 index 未记录"))
     return report, summary
 
 

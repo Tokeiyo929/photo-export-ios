@@ -78,6 +78,18 @@ class ManifestParsingTest(unittest.TestCase):
         ]
         self.assertEqual(pe_common.pullable_rows(rows), [])
 
+    def test_rows_from_index(self):
+        raw = "32768\tphotos/2026/2026-03-15/IMG_0001.HEIC\n"
+        raw += "\n"
+        raw += "abc\tbad-line-skipped\n"
+        raw += "4096\tphotos/2026/2026-03-15/IMG_0001.mov"
+        rows = pe_common.rows_from_index(raw.encode("utf-8"))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].relative_path, "photos/2026/2026-03-15/IMG_0001.HEIC")
+        self.assertEqual(rows[0].size, 32768)
+        self.assertEqual(rows[0].sha256, "")  # v4 无手机端哈希基线
+        self.assertEqual(rows[1].relative_path, "photos/2026/2026-03-15/IMG_0001.mov")
+
 
 class VerifyFolderTest(unittest.TestCase):
     def setUp(self):
@@ -157,6 +169,61 @@ class VerifyFolderTest(unittest.TestCase):
         report, summary = pe_common.verify_folder(self.folder)
         self.assertFalse(summary.ok)
         self.assertEqual(summary.missing, 1)
+
+
+class VerifyFolderIndexTest(unittest.TestCase):
+    """v4 传送带目录：只有 index.txt（大小+路径，无哈希基线），哈希电脑端现算留档。"""
+    def setUp(self):
+        import tempfile
+        self.folder = Path(tempfile.mkdtemp(prefix="pe-idx-"))
+        self.payload_a = b"AAA" * 100
+        self.payload_b = b"BBB" * 200
+        (self.folder / "photos/2026/2026-03-15").mkdir(parents=True)
+        (self.folder / "photos/2026/2026-03-15/a.HEIC").write_bytes(self.payload_a)
+        (self.folder / "photos/2026/2026-03-15/b.MOV").write_bytes(self.payload_b)
+        index = [f"{len(self.payload_a)}\tphotos/2026/2026-03-15/a.HEIC",
+                 f"{len(self.payload_b)}\tphotos/2026/2026-03-15/b.MOV"]
+        (self.folder / pe_common.INDEX_NAME).write_text("\n".join(index) + "\n", encoding="utf-8")
+
+    def test_all_pass_with_computed_hash_recorded(self):
+        report, summary = pe_common.verify_folder_index(self.folder)
+        self.assertTrue(summary.ok)
+        self.assertEqual(summary.passed, 2)
+        rows = {r["relative_path"]: r for r in report}
+        row = rows["photos/2026/2026-03-15/a.HEIC"]
+        self.assertEqual(row["result"], "PASS")
+        self.assertEqual(row["expected_sha256"], row["actual_sha256"])  # 现算即基线
+        self.assertEqual(row["expected_sha256"], pe_common.sha256_file(
+            self.folder / "photos/2026/2026-03-15/a.HEIC"))
+
+    def test_size_mismatch_fails(self):
+        target = self.folder / "photos/2026/2026-03-15/a.HEIC"
+        target.write_bytes(b"XX" * 100)  # 大小变了：index 基线能抓的就是这个
+        report, summary = pe_common.verify_folder_index(self.folder)
+        self.assertFalse(summary.ok)
+        self.assertEqual(summary.failed, 1)
+
+    def test_missing_file_reported(self):
+        (self.folder / "photos/2026/2026-03-15/b.MOV").unlink()
+        _, summary = pe_common.verify_folder_index(self.folder)
+        self.assertFalse(summary.ok)
+        self.assertEqual(summary.missing, 1)
+
+    def test_index_and_report_not_extra(self):
+        (self.folder / "export-report.csv").write_text("x", encoding="utf-8")
+        _, summary = pe_common.verify_folder_index(self.folder)
+        self.assertEqual(summary.extra, 0)
+        (self.folder / "photos/orphan.HEIC").write_bytes(b"O")
+        _, summary = pe_common.verify_folder_index(self.folder)
+        self.assertEqual(summary.extra, 1)
+
+    def test_no_index_fails_cleanly(self):
+        import tempfile
+        empty = Path(tempfile.mkdtemp(prefix="pe-empty-"))
+        report, summary = pe_common.verify_folder_index(empty)
+        self.assertFalse(summary.ok)
+        self.assertEqual(summary.failed, 1)  # 与 verify_folder 缺清单同款约定
+        self.assertEqual(report[0]["result"], "MISSING")
 
 
 class StoreZipTest(unittest.TestCase):
@@ -331,6 +398,21 @@ class CompareOriginalsTest(unittest.TestCase):
         # 哈希谁都不匹配 → mismatch 分支（hit 为 None）
         self.assertIsNone(next((r for r in index["IMG_1.JPG"]
                                  if r.sha256 == hashlib.sha256(b"other").hexdigest()), None))
+
+    def test_compare_baseline_rows_index_mode_uses_report(self):
+        # v4 index 模式没有手机端哈希：对照基线 = 本次拉取现算留档的 PASS/SKIP 行
+        import pull
+        report = [
+            pe_common._report_row("photos/2026/IMG_1.HEIC", "h1", "h1", 10, "PASS", ""),
+            pe_common._report_row("photos/2026/IMG_2.HEIC", "", "", 10, "FAIL", "拉取失败"),
+            pe_common._report_row("photos/2026/IMG_3.HEIC", "(fr)", "(fr)", 10, "SKIP-VERIFIED", ""),
+        ]
+        rows = pull.compare_baseline_rows("index", [], report)
+        self.assertEqual([r.relative_path for r in rows], ["photos/2026/IMG_1.HEIC", "photos/2026/IMG_3.HEIC"])
+        self.assertEqual(rows[0].sha256, "h1")
+        # manifest 模式仍走手机端哈希（含 PULLED/FAIL——对照不限状态）
+        manifest_rows = [pe_common.ManifestRow(relative_path="2024/IMG_1.JPG", sha256="old")]
+        self.assertEqual(pull.compare_baseline_rows("manifest", manifest_rows, report), manifest_rows)
 
 
 if __name__ == "__main__":

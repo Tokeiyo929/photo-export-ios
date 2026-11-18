@@ -1,14 +1,13 @@
 #if DEBUG
 import Foundation
 
-/// 分享导入链路自测（-autoTest 时跑）：直接往 App Group 收件箱按扩展的两种历史
-/// 队列格式投文件，验证 drain 的解析/落位/登记/孤儿补收/重复跳过/队列重写。
-/// CI 模拟器能过 = 代码链路本身没问题；真机还 0 项时只剩「容器不一致」一种解释。
+/// 导入链路自测（-autoTest 时跑，v4 传送带语义）：
+/// ①导入夹文件全部入暂存 ②同名不同内容防撞名 ③扩展收件箱无队列也收+队列销毁。
+/// 没有清单可断言——断言暂存区里的文件本身。
 enum SharePipelineTest {
 
     private struct Ctx {
         let docs: URL
-        let manifest: URL
         let inbox: URL
         let queue: URL
     }
@@ -21,16 +20,12 @@ enum SharePipelineTest {
         try? fm.createDirectory(at: docs, withIntermediateDirectories: true)
         guard let inbox = SharedGroup.inboxDirectory(), let queue = SharedGroup.queueURL() else {
             try? fm.removeItem(at: base)
-            return [TestOutcome(name: "分享导入链路: 容器可用", passed: false,
+            return [TestOutcome(name: "导入链路: 容器可用", passed: false,
                                 detail: SharedGroup.lastProbeDescription)]
         }
-        let ctx = Ctx(docs: docs, manifest: docs.appendingPathComponent("manifest.csv"),
-                      inbox: inbox, queue: queue)
-        clean(ctx.inbox, ctx.queue)
-        defer {
-            clean(ctx.inbox, ctx.queue)
-            try? fm.removeItem(at: base)
-        }
+        let ctx = Ctx(docs: docs, inbox: inbox, queue: queue)
+        cleanGroupInbox(ctx)
+        defer { cleanGroupInbox(ctx); try? fm.removeItem(at: base) }
 
         var outs: [TestOutcome] = []
         func record(_ name: String, _ body: () throws -> Void) {
@@ -47,63 +42,61 @@ enum SharePipelineTest {
                               userInfo: [NSLocalizedDescriptionKey: message])
             }
         }
-        func manifestRows() -> Int {
-            ManifestStore.load(url: ctx.manifest).0.count
+        func stagedFiles() -> [String] {
+            var names: [String] = []
+            if let walker = fm.enumerator(at: ctx.docs.appendingPathComponent("photos"),
+                                          includingPropertiesForKeys: nil) {
+                for case let url as URL in walker where !url.hasDirectoryPath {
+                    names.append(url.lastPathComponent)
+                }
+            }
+            return names.sorted()
+        }
+        func rootStrays() -> [String] {
+            ((try? fm.contentsOfDirectory(atPath: ctx.docs.path)) ?? [])
+                .filter { !$0.hasDirectoryPath && !$0.hasPrefix(".") }
         }
 
-        record("分享导入链路: 新版字典队列行") {
-            try writeFile("IMG_9001.JPG", byte: 0x11, ctx: ctx)
-            try writeQueue(["{\"file\":\"IMG_9001.JPG\",\"note\":\"单元测试\"}"], ctx: ctx)
-            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
+        record("导入链路: 导入夹与根散落文件全部入暂存") {
+            try Data(repeating: 0x11, count: 256).write(to: ctx.docs.appendingPathComponent("导入").appendingPathComponent("A_9001.JPG"))
+            try Data(repeating: 0x22, count: 256).write(to: ctx.docs.appendingPathComponent("B_9002.jpg"))
+            let n = SharedIn.drainImportFolder(documentsURL: ctx.docs, storeURL: ctx.docs).imported
+            try require(n == 2, "imported=\(n)")
+            let staged = stagedFiles()
+            try require(staged == ["A_9001.JPG", "B_9002.jpg"], "暂存区应有两个文件，得到 \(staged)")
+            try require(rootStrays().isEmpty, "根散落文件应被收走，剩 \(rootStrays())")
+        }
+
+        record("导入链路: 同名不同内容防撞名") {
+            let dir = ctx.docs.appendingPathComponent("导入", isDirectory: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(repeating: 0x33, count: 256).write(to: dir.appendingPathComponent("C_9003.HEIC"))
+            try Data(repeating: 0x44, count: 512).write(to: dir.appendingPathComponent("C_9003 (1).HEIC"))
+            _ = SharedIn.drainImportFolder(documentsURL: ctx.docs, storeURL: ctx.docs)
+            let cFiles = stagedFiles().filter { $0.hasPrefix("C_9003") }
+            try require(cFiles.count == 2, "同名应共存不覆盖，得到 \(cFiles)")
+        }
+
+        record("导入链路: 扩展收件箱无队列也收且队列销毁") {
+            try Data(repeating: 0x55, count: 256).write(to: ctx.inbox.appendingPathComponent("D_9004.PNG"))
+            try Data("{\"file\":\"D_9004.PNG\"}".utf8).write(to: ctx.queue)
+            let n = SharedIn.drain(storeURL: ctx.docs).imported
             try require(n == 1, "imported=\(n)")
-            try require(manifestRows() == 1, "manifest 应 1 行")
-            try require(!FileManager.default.fileExists(atPath: ctx.queue.path), "队列应被清空删除")
-            let names = (try? FileManager.default.contentsOfDirectory(atPath: ctx.inbox.path)) ?? []
-            try require(names.isEmpty, "收件箱应清空，剩 \(names)")
-        }
-
-        record("分享导入链路: 数组队列行（扩展旧版格式）") {
-            try writeFile("IMG_9002.JPG", byte: 0x22, ctx: ctx)
-            try writeQueue(["[{\"file\":\"IMG_9002.JPG\",\"note\":\"\"}]"], ctx: ctx)
-            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
-            try require(n == 1, "imported=\(n)")
-            try require(manifestRows() == 2, "manifest 应 2 行")
-        }
-
-        record("分享导入链路: 收件箱孤儿文件补收") {
-            try writeFile("IMG_9003.JPG", byte: 0x33, ctx: ctx)
-            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
-            try require(n == 1, "imported=\(n)")
-            try require(manifestRows() == 3, "manifest 应 3 行")
-        }
-
-        record("分享导入链路: 重复内容跳过且不重复登记") {
-            try writeFile("IMG_9003.JPG", byte: 0x33, ctx: ctx) // 同名同哈希再来一次
-            try writeQueue(["{\"file\":\"IMG_9003.JPG\",\"note\":\"\"}"], ctx: ctx)
-            let n = SharedIn.drain(storeURL: ctx.docs, manifestURL: ctx.manifest).imported
-            try require(n == 0, "重复应跳过，imported=\(n)")
-            try require(manifestRows() == 3, "manifest 行数不应变")
-            let names = (try? FileManager.default.contentsOfDirectory(atPath: ctx.inbox.path)) ?? []
-            try require(names.isEmpty, "重复文件也应从收件箱移除，剩 \(names)")
+            try require(stagedFiles().contains("D_9004.PNG"), "收件箱文件应入暂存")
+            try require(!fm.fileExists(atPath: ctx.queue.path), "队列文件应被销毁")
+            let left = (try? fm.contentsOfDirectory(atPath: ctx.inbox.path)) ?? []
+            try require(left.isEmpty, "收件箱应清空，剩 \(left)")
         }
 
         return outs
     }
 
-    private static func writeFile(_ name: String, byte: UInt8, ctx: Ctx) throws {
-        try Data(repeating: byte, count: 256).write(to: ctx.inbox.appendingPathComponent(name))
-    }
-
-    private static func writeQueue(_ lines: [String], ctx: Ctx) throws {
-        try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: ctx.queue)
-    }
-
-    private static func clean(_ inbox: URL, _ queue: URL) {
+    private static func cleanGroupInbox(_ ctx: Ctx) {
         let fm = FileManager.default
-        for name in (try? fm.contentsOfDirectory(atPath: inbox.path)) ?? [] {
-            try? fm.removeItem(at: inbox.appendingPathComponent(name))
+        for name in (try? fm.contentsOfDirectory(atPath: ctx.inbox.path)) ?? [] {
+            try? fm.removeItem(at: ctx.inbox.appendingPathComponent(name))
         }
-        try? fm.removeItem(at: queue)
+        try? fm.removeItem(at: ctx.queue)
     }
 }
 #endif

@@ -76,12 +76,22 @@ final class SmokeTour {
         ExportLog.write("SMOKE fixtures planted=2 importDir=\(importDir.path)")
         state.drainSharedInbox()
         waitUntil(timeout: 120,
-                  check: { state.manifestStats.okCount >= 2 },
-                  onTimeout: { "分享导入 120s 未登记 2 项 diag=\(state.shareDiag) last=\(state.shareLastLine)" }) { [weak self] in
+                  check: { Self.stagedCount() >= 2 },
+                  onTimeout: { "导入 120s 未入暂存 2 个 diag=\(state.shareDiag) last=\(state.shareLastLine)" }) { [weak self] in
             guard let self else { return }
             // 等主队列把卡片文案刷出来再截图（drain 结果在 DispatchQueue.main.async 落地）
             self.delay(0.8) { self.showMarker(index) }
         }
+    }
+
+    /// 暂存区（store/photos/）里的文件总数
+    static func stagedCount() -> Int {
+        let fm = FileManager.default
+        var count = 0
+        if let walker = fm.enumerator(at: AppStorage.stagingURL, includingPropertiesForKeys: nil) {
+            for case let url as URL in walker where !url.hasDirectoryPath { count += 1 }
+        }
+        return count
     }
 
     private func showMarker(_ index: Int) {
