@@ -53,8 +53,13 @@ enum SharePipelineTest {
             return names.sorted()
         }
         func rootStrays() -> [String] {
-            ((try? fm.contentsOfDirectory(atPath: ctx.docs.path)) ?? [])
-                .filter { !$0.hasDirectoryPath && !$0.hasPrefix(".") }
+            let names = (try? fm.contentsOfDirectory(atPath: ctx.docs.path)) ?? [String]()
+            return names.filter { name in
+                guard !name.hasPrefix(".") else { return false }
+                var isDir: ObjCBool = false
+                return fm.fileExists(atPath: ctx.docs.appendingPathComponent(name).path,
+                                     isDirectory: &isDir) && !isDir.boolValue
+            }
         }
 
         record("导入链路: 导入夹与根散落文件全部入暂存") {
