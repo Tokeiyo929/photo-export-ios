@@ -213,6 +213,15 @@ def compare_baseline_rows(listing_kind: str, rows, report: list) -> list:
             for r in report if r["result"] in ("PASS", "SKIP-VERIFIED")]
 
 
+def short_afc_error(error: Exception) -> str:
+    """AFC 错误缩写：抽出「(AFC status XXX)」段，便于逐路径罗列比对。"""
+    text = str(error)
+    marker = "(AFC status "
+    if marker in text:
+        return text[text.index(marker) + 1:].rstrip(")")
+    return text[-80:]
+
+
 def wifi_pull(args: argparse.Namespace) -> int:
     base = (args.wifi or "").strip()
     if not base or base.lower() in ("discover", "auto"):
@@ -402,6 +411,26 @@ async def amain(args: argparse.Namespace) -> int:
     listing_bytes: bytes | None = None
     listing_kind = ""  # "index"（v4）或 "manifest"（旧版）
     last_error: Exception | None = None
+    attempts: list[tuple[str, str]] = []   # (AFC 路径, 短错误) 全记录，失败时逐条打印
+
+    async def pull_diag_logs(bases: list[str]) -> None:
+        """诊断日志回捞：清单读不到时也要拿到（真机挂死不留报告，时间线在这里）。
+        bases 按优先级给文件区前缀；名字取 basename 落 dest。"""
+        cands: list[str] = []
+        for b in bases:
+            for n in ("logs/export-log.txt", "logs/export-log.old.txt",
+                      "export-log.txt", "export-log.old.txt"):
+                p = "/".join(x for x in [offset, b, n] if x)
+                if p not in cands:
+                    cands.append(p)
+        for diag in cands:
+            try:
+                data = await house.get_file_contents(diag)
+            except Exception:
+                continue
+            target = dest / f"device-{diag.rsplit('/', 1)[-1]}"
+            target.write_bytes(data)
+            pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
 
     # 第一轮 VendDocuments：只够得着 Documents 根（旧布局）
     for kind, name in [("index", pe_common.INDEX_NAME), ("manifest", pe_common.MANIFEST_NAME)]:
@@ -412,6 +441,7 @@ async def amain(args: argparse.Namespace) -> int:
             break
         except Exception as error:
             last_error = error
+            attempts.append((name, short_afc_error(error)))
     if listing_bytes is None:
         pe_common.log(f"VendDocuments 视图读不到 index/manifest：{last_error}")
         pe_common.log("退回 VendContainer（整容器）再试——iOS 27 两种 vend 命令的容器映射可能不同。")
@@ -433,12 +463,20 @@ async def amain(args: argparse.Namespace) -> int:
                     break
                 except Exception as error2:
                     last_error = error2
+                    attempts.append(("/".join(parts), short_afc_error(error2)))
             if listing_bytes is not None:
                 break
     if listing_bytes is None:
-        pe_common.log(f"两种 vend 都读不到 index.txt / manifest.csv（{last_error}）。")
-        pe_common.log("请先在手机上打开一次本 App（它会自动搬运照片并生成清单），再重拉；")
-        pe_common.log("若 App 侧显示「已入暂存」仍拉不到，截图 App 首页诊断行排查。")
+        pe_common.log("两种 vend 都读不到 index.txt / manifest.csv。各路径实际结果：")
+        for path_label, err in attempts:
+            pe_common.log(f"  {path_label} → {err}")
+        if all("OBJECT_NOT_FOUND" in e for _, e in attempts):
+            pe_common.log("= 手机沙盒里既没有 index.txt 也没有 manifest.csv。两种可能：")
+            pe_common.log("① 装了新 ipa（重签=新容器，旧数据不跟过来）且还没打开过 App → 先打开 App、导入照片，再拉")
+            pe_common.log("② App 打开过、首页也显示「已入暂存」→ 截图首页（顶部构建号+占用卡）反馈")
+        else:
+            pe_common.log("出现了非 OBJECT_NOT_FOUND 的错误 = AFC 容器视图/权限问题（iOS 27 已知怪癖），截图反馈")
+        await pull_diag_logs([APP_SUPPORT, ""])  # 清单读不到也要回捞日志
         return 2
 
     def rooted(rel: str) -> str:
@@ -446,23 +484,9 @@ async def amain(args: argparse.Namespace) -> int:
         parts = [p for p in [offset, base, rel] if p]
         return "/".join(parts)
 
-    # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留崩溃报告，时间线在这里。
-    # v3 布局 logs/ 在 App Support 下；旧版在 Documents/logs/ 或 Documents 根。名字取 basename 落 dest。
-    diag_candidates = []
-    for d in [f"{base}/logs/export-log.txt" if base else "logs/export-log.txt",
-              f"{base}/logs/export-log.old.txt" if base else "logs/export-log.old.txt",
-              "logs/export-log.txt", "logs/export-log.old.txt",
-              "export-log.txt", "export-log.old.txt"]:
-        if d not in diag_candidates:
-            diag_candidates.append(d)
-    for diag in diag_candidates:
-        try:
-            data = await house.get_file_contents(rooted(diag))
-        except Exception:
-            continue
-        target = dest / f"device-{diag.rsplit('/', 1)[-1]}"
-        target.write_bytes(data)
-        pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
+    # 诊断日志顺带拉回（不参与校验）：真机闪退常常不留报告，时间线在这里。
+    # 优先已发现布局的 logs/，再扫旧版根目录（pull_diag_logs 内部去重）。
+    await pull_diag_logs([base, ""] if base else [""])
     malformed = 0
     pulled_note = ""
     if listing_kind == "manifest":
