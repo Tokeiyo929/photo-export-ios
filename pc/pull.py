@@ -64,6 +64,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compare-orphans", action="store_true",
                         help="原图对照：把清单外文件（你在相册用系统「导出未修改的原片」"
                              "分享进本 App 的）也拉到 _原图对照/ 并与清单哈希逐个比对")
+    parser.add_argument("--coredevice", action="store_true",
+                        help="强制走 CoreDevice FileService 通道（Xcode 同款，绕开 house_arrest；"
+                             "iOS 17+ Windows 免 root 用户态隧道）。house_arrest 读不到清单时"
+                             "也会自动切到本通道，一般无需手动指定")
     return parser.parse_args()
 
 
@@ -329,6 +333,215 @@ def wifi_pull(args: argparse.Namespace) -> int:
     return 0 if summary.ok else 1
 
 
+async def coredevice_amain(args: argparse.Namespace) -> int:
+    """CoreDevice FileService 通道（iOS 17+，Xcode/开发者工具同款）：走 RSD 加密隧道 +
+    dtfileserviced，**完全绕开 house_arrest**——house_arrest 读到过期容器视图时这是生态正路
+    （调研实锤：pymobiledevice3 remote/core_device/file_service.py，Windows 免 root 用户态隧道）。
+    注意：appDataContainer 域=整个数据容器（路径相对容器根，等价 VendContainer 视图）；
+    文件整读进内存（分块 512KB 累加），照片/视频量级可接受。"""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.remote.core_device.file_service import Domain, FileServiceService
+    from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+    dest = Path(args.dest)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # 解析重签后缀 bundle id（与 house_arrest 通道同一套逻辑：精确→前缀→缓存）
+    bundle = args.app
+    last_error: Exception | None = None
+    pe_common.log("枚举已装 App（解析重签后缀）…")
+    for attempt in range(5):
+        try:
+            enum_lockdown = await create_using_usbmux(serial=args.udid)
+            try:
+                installed = await InstallationProxyService(enum_lockdown).get_apps()
+            finally:
+                await enum_lockdown.close()
+            if bundle in installed:
+                break
+            candidates = sorted(b for b in installed
+                                if b == args.app or b.startswith(args.app + "."))
+            if len(candidates) == 1:
+                bundle = candidates[0]
+                pe_common.log(f"App 已重签名，实际 bundle id：{bundle}")
+            elif len(candidates) > 1:
+                pe_common.log("找到多个匹配的 App，请用 --app 指定其一：")
+                for b in candidates:
+                    pe_common.log(f"  {b}")
+                return 2
+            break
+        except Exception as error:
+            last_error = error
+            if attempt < 4:
+                await asyncio.sleep(2)
+    else:
+        cached = read_cache()
+        if cached:
+            bundle = cached
+            pe_common.log(f"枚举失败（{last_error}），用缓存 App id：{bundle}")
+        else:
+            pe_common.log(f"枚举失败（{last_error}），按原名尝试。")
+
+    tunnel = UserspaceRsdTunnel(serial=args.udid)
+    pe_common.log("建立 CoreDevice 用户态隧道（iOS 17+ 免 root，首次要几秒）…")
+    rsd = await tunnel.aopen()
+    try:
+        pe_common.log(f"隧道已建立（udid={rsd.udid}）。打开 App 数据容器（dtfileserviced）：{bundle}")
+        async with FileServiceService(rsd, Domain.APP_DATA_CONTAINER, bundle) as fs:
+            return await _coredevice_pull(args, fs, dest, bundle)
+    finally:
+        try:
+            await rsd.close()
+        except Exception:
+            pass
+        await tunnel.aclose()
+
+
+async def _coredevice_pull(args: argparse.Namespace, fs, dest: Path, bundle: str) -> int:
+    APP_SUPPORT = "Library/Application Support/PhotoExport"
+
+    async def pull_diag_logs(bases: list[str]) -> None:
+        cands: list[tuple[str, str]] = []
+        for b in bases:
+            for n in ("logs/export-log.txt", "logs/export-log.old.txt",
+                      "export-log.txt", "export-log.old.txt"):
+                p = "/".join(x for x in [b, n] if x)
+                btag = "" if b == APP_SUPPORT else "-docroot"
+                ltag = "" if n.startswith("logs/") else "-rootfile"
+                name = f"device-{Path(n).stem}{ltag}{btag}.txt"
+                if not any(c[1] == name for c in cands):
+                    cands.append((p, name))
+        for diag, name in cands:
+            try:
+                data = await fs.get_file_contents(diag)
+            except Exception:
+                continue
+            target = dest / name
+            target.write_bytes(data)
+            pe_common.log(f"已拉回诊断日志：{diag} → {target}（{pe_common.bytes_str(len(data))}）")
+
+    # 清单发现：容器根视角，App Support 优先（v3+/v4），Documents 根兜底（旧布局）
+    listing_bytes: bytes | None = None
+    listing_kind = ""
+    base = ""
+    for kind, name in [("index", pe_common.INDEX_NAME), ("manifest", pe_common.MANIFEST_NAME)]:
+        for cand_base in (APP_SUPPORT, "", "Documents"):
+            path = "/".join(x for x in [cand_base, name] if x)
+            try:
+                listing_bytes = await fs.get_file_contents(path)
+                listing_kind = kind
+                base = cand_base
+                pe_common.log(f"CoreDevice 命中 {kind}：{path}")
+                break
+            except Exception:
+                continue
+        if listing_bytes is not None:
+            break
+    if listing_bytes is None:
+        pe_common.log("CoreDevice 通道也读不到 index.txt / manifest.csv。")
+        pe_common.log("= 数据容器里真没有清单文件：App 还没打开过/没导入过（App 自己能看到就截图反馈）。")
+        await pull_diag_logs([APP_SUPPORT, "", "Documents"])
+        return 2
+
+    def rooted(rel: str) -> str:
+        return "/".join(x for x in [base, rel] if x)
+
+    await pull_diag_logs([base] if base else [""])
+    malformed = 0
+    pulled_note = ""
+    if listing_kind == "manifest":
+        rows, malformed = pe_common.parse_manifest_bytes(listing_bytes)
+        (dest / pe_common.MANIFEST_NAME).write_bytes(listing_bytes)
+        expected = pe_common.pullable_rows(rows)
+        if any(r.status == "PULLED" for r in pe_common.last_wins(rows)):
+            pulled_note = "（PULLED 的已拉取清理，跳过）"
+        pe_common.log(f"清单：待拉取 {len(expected)} 个文件{pulled_note}"
+                      + (f"，损坏行 {malformed}" if malformed else ""))
+    else:
+        rows = []
+        expected = pe_common.rows_from_index(listing_bytes)
+        (dest / "index.txt").write_bytes(listing_bytes)
+        pe_common.log(f"暂存区清单（index.txt，v4 传送带）：待拉取 {len(expected)} 个文件（哈希现算留档）")
+
+    # 逐文件拉取 + 校验（语义与 house_arrest 通道一致；设备端大小用 get_attributes 对账）
+    report: list[dict] = []
+    summary = pe_common.VerifySummary()
+    done = 0
+    for row in expected:
+        done += 1
+        rel = row.relative_path
+        target = pe_common.local_path(dest, rel)
+        prefix = f"[{done}/{len(expected)}]"
+        device_size = 0
+        try:
+            attrs = await fs.get_attributes(rooted(rel))
+            device_size = int(attrs.get("size", 0))
+        except Exception:
+            pass  # 属性拿不到不拦路：拉取时以实际内容为准
+        if target.exists() and target.stat().st_size == row.size and (not device_size or device_size == row.size):
+            dest_sha = pe_common.sha256_file(target)
+            if not row.sha256:
+                summary.skipped_verified += 1
+                summary.total_bytes += row.size
+                report.append(pe_common._report_row(rel, dest_sha, dest_sha, row.size,
+                                                    "SKIP-VERIFIED", "同大小（无手机端哈希基线）"))
+                pe_common.log(f"{prefix} SKIP  {rel}")
+                continue
+            if args.fast_resume:
+                summary.skipped_verified += 1
+                summary.total_bytes += row.size
+                report.append(pe_common._report_row(rel, row.sha256, "(fast-resume)", row.size,
+                                                    "SKIP-VERIFIED", "同大小，未重算哈希"))
+                pe_common.log(f"{prefix} SKIP  {rel}")
+                continue
+            if dest_sha == row.sha256:
+                summary.skipped_verified += 1
+                summary.total_bytes += row.size
+                report.append(pe_common._report_row(rel, row.sha256, dest_sha, row.size,
+                                                    "SKIP-VERIFIED", "已存在且哈希一致"))
+                pe_common.log(f"{prefix} SKIP  {rel}")
+                continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = await fs.get_file_contents(rooted(rel))
+        except Exception as error:
+            summary.failed += 1
+            report.append(pe_common._report_row(rel, row.sha256, "", 0, "ERROR", f"CoreDevice 拉取失败：{error}"))
+            pe_common.log(f"{prefix} ERROR {rel} —— {error}")
+            continue
+        target.write_bytes(data)
+        del data
+        actual_sha = pe_common.sha256_file(target)
+        actual_size = target.stat().st_size
+        if actual_size != row.size or (row.sha256 and actual_sha != row.sha256):
+            summary.failed += 1
+            report.append(pe_common._report_row(rel, row.sha256, actual_sha, actual_size, "FAIL",
+                                                "拉取后大小/哈希不一致"))
+            pe_common.log(f"{prefix} FAIL  {rel}")
+        else:
+            summary.passed += 1
+            summary.total_bytes += actual_size
+            report.append(pe_common._report_row(rel, row.sha256 or actual_sha, actual_sha, actual_size, "PASS", ""))
+            pe_common.log(f"{prefix} PASS  {rel}  ({pe_common.bytes_str(actual_size)})")
+
+    report_path = pe_common.default_report_path(dest)
+    pe_common.write_report(report, report_path)
+    pe_common.log(f"报告：{report_path}")
+    pe_common.log(f"结果：PASS {summary.passed} · 已验证跳过 {summary.skipped_verified} · "
+                  f"FAIL {summary.failed} · 总量 {pe_common.bytes_str(summary.total_bytes)}")
+    if args.compare_orphans:
+        pe_common.log("（--compare-orphans 在 CoreDevice 通道暂不可用——数据线 house_arrest 恢复后再对照）")
+    if args.zip:
+        if summary.failed:
+            pe_common.log("有 FAIL 项，跳过打包（先解决失败再 --zip）。")
+        else:
+            zip_path = dest.parent / f"照片导出-{pe_common.stamp()}.zip"
+            count, zipped = pe_common.make_store_zip(dest, zip_path)
+            pe_common.log(f"仅存储 ZIP：{zip_path}（{count} 个文件，{pe_common.bytes_str(zipped)}，字节未动）")
+    return 0 if summary.ok else 1
+
+
 async def amain(args: argparse.Namespace) -> int:
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.house_arrest import HouseArrestService
@@ -491,7 +704,23 @@ async def amain(args: argparse.Namespace) -> int:
             except Exception as error:
                 pe_common.log(f"listdir {dir_path or '/'} → {short_afc_error(error)}")
         await pull_diag_logs([APP_SUPPORT, ""])  # 清单读不到也要回捞日志
-        return 2
+        # house_arrest 读不到清单（疑似 iOS 27 过期容器视图）→ 自动换 CoreDevice 通道再试。
+        # 调研实锤：Xcode 同款 dtfileserviced，独立重新解析 bundle id，完全绕开 house_arrest。
+        pe_common.log("===== 自动切换 CoreDevice FileService 通道（Xcode 同款，绕开 house_arrest）=====")
+        try:
+            await lockdown.close()
+        except Exception:
+            pass
+        try:
+            return await coredevice_amain(args)
+        except ImportError as error:
+            pe_common.log(f"CoreDevice 通道不可用（pymobiledevice3 太旧，先 pip install -U pymobiledevice3）：{error}")
+            return 2
+        except Exception as error:
+            pe_common.log(f"CoreDevice 通道也失败：{error}")
+            pe_common.log("排查：①手机重启后再试（iloader#294 实锤能重置设备侧 vend 缓存）"
+                          "②确认手机已解锁且信任了电脑 ③iOS 17.0-17.3 需管理员 tunneld（iOS 27 不需要）")
+            return 2
 
     def rooted(rel: str) -> str:
         """App 内部文件区相对路径 → AFC 会话里的实际路径。"""
@@ -701,6 +930,15 @@ def main() -> int:
         return 2
     if args.wifi is not None:  # 空串也算 WiFi 模式（拉取.bat 回车=自动发现）
         return wifi_pull(args)
+    if args.coredevice:  # 强制 CoreDevice 通道（跳过 house_arrest）
+        try:
+            return asyncio.run(coredevice_amain(args))
+        except KeyboardInterrupt:
+            pe_common.log("\n已中断。重跑同一命令会续跑（已验证的文件自动跳过）。")
+            return 130
+        except Exception as error:
+            pe_common.log(f"CoreDevice 通道失败：{error}")
+            return 2
     try:
         return asyncio.run(amain(args))
     except KeyboardInterrupt:
