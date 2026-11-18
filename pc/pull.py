@@ -415,22 +415,26 @@ async def amain(args: argparse.Namespace) -> int:
 
     async def pull_diag_logs(bases: list[str]) -> None:
         """诊断日志回捞：清单读不到时也要拿到（真机挂死不留报告，时间线在这里）。
-        bases 按优先级给文件区前缀；名字取 basename 落 dest。"""
-        cands: list[str] = []
+        bases 按优先级给文件区前缀。不同布局的同名文件**必须**落不同名——
+        否则 Documents 根的陈年残留会把 App Support 里的当前日志覆盖掉（实锤踩过）。"""
+        cands: list[tuple[str, str]] = []   # (AFC 路径, 落盘文件名)
         for b in bases:
             for n in ("logs/export-log.txt", "logs/export-log.old.txt",
                       "export-log.txt", "export-log.old.txt"):
                 p = "/".join(x for x in [offset, b, n] if x)
-                if p not in cands:
-                    cands.append(p)
-        for diag in cands:
+                btag = "" if b == APP_SUPPORT else "-docroot"   # Documents 根的旧版残留
+                ltag = "" if n.startswith("logs/") else "-rootfile"
+                name = f"device-{Path(n).stem}{ltag}{btag}.txt"
+                if not any(c[1] == name for c in cands):
+                    cands.append((p, name))
+        for diag, name in cands:
             try:
                 data = await house.get_file_contents(diag)
             except Exception:
                 continue
-            target = dest / f"device-{diag.rsplit('/', 1)[-1]}"
+            target = dest / name
             target.write_bytes(data)
-            pe_common.log(f"已拉回诊断日志：{target}（{pe_common.bytes_str(len(data))}）")
+            pe_common.log(f"已拉回诊断日志：{diag} → {target}（{pe_common.bytes_str(len(data))}）")
 
     # 第一轮 VendDocuments：只够得着 Documents 根（旧布局）
     for kind, name in [("index", pe_common.INDEX_NAME), ("manifest", pe_common.MANIFEST_NAME)]:
@@ -476,6 +480,16 @@ async def amain(args: argparse.Namespace) -> int:
             pe_common.log("② App 打开过、首页也显示「已入暂存」→ 截图首页（顶部构建号+占用卡）反馈")
         else:
             pe_common.log("出现了非 OBJECT_NOT_FOUND 的错误 = AFC 容器视图/权限问题（iOS 27 已知怪癖），截图反馈")
+        # 容器指纹：有的设备/通道允许列目录，能列出来就直接看里面有什么
+        for dir_path in ["/".join(x for x in [offset, APP_SUPPORT] if x),
+                         "/".join(x for x in [offset] if x)]:
+            try:
+                names = await house.listdir(dir_path)
+                shown = sorted(names)[:20]
+                more = f"（共 {len(names)} 个，只显示前 20）" if len(names) > 20 else ""
+                pe_common.log(f"listdir {dir_path or '/'} → {shown}{more}")
+            except Exception as error:
+                pe_common.log(f"listdir {dir_path or '/'} → {short_afc_error(error)}")
         await pull_diag_logs([APP_SUPPORT, ""])  # 清单读不到也要回捞日志
         return 2
 

@@ -263,6 +263,7 @@ final class AppState: ObservableObject {
             scan.scanned = true
             try? Data(indexLines.joined(separator: "\n").utf8)
                 .write(to: AppStorage.indexURL, options: .atomic)
+            ExportLog.write("INDEX rebuilt files=\(indexLines.count) stagingBytes=\(scan.bytes)")
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.scanningStorage = false
