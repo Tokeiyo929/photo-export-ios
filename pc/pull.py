@@ -717,9 +717,14 @@ async def amain(args: argparse.Namespace) -> int:
             pe_common.log(f"CoreDevice 通道不可用（pymobiledevice3 太旧，先 pip install -U pymobiledevice3）：{error}")
             return 2
         except Exception as error:
-            pe_common.log(f"CoreDevice 通道也失败：{error}")
-            pe_common.log("排查：①手机重启后再试（iloader#294 实锤能重置设备侧 vend 缓存）"
-                          "②确认手机已解锁且信任了电脑 ③iOS 17.0-17.3 需管理员 tunneld（iOS 27 不需要）")
+            text = str(error)
+            pe_common.log(f"CoreDevice 通道也失败：{text}")
+            if "does not offer" in text and "fileservice" in text:
+                pe_common.log("= 设备没开放文件服务：**手机 设置→隐私与安全性→开发者模式 打开（要重启）** 再拉。")
+                pe_common.log("  （Sideloadly 装用不需要开发者模式，但 CoreDevice 文件服务需要——Xcode 同款门禁）")
+            else:
+                pe_common.log("排查：①手机重启后再试（iloader#294 实锤能重置设备侧 vend 缓存）"
+                              "②确认手机已解锁且信任了电脑 ③iOS 17.0-17.3 需管理员 tunneld（iOS 27 不需要）")
             return 2
 
     def rooted(rel: str) -> str:
